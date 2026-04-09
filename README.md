@@ -1,6 +1,8 @@
 # Kaotik — Rust crypto library and CLI
 
-Platform-independent encryption. **Kyber:** NIST FIPS 203 ML-KEM (Kyber-768), kuantum direnci. **Kaotik:** 8 katman hibrit kaotik + permütasyon + S-box. **AES:** Sadece AES-256-GCM (NIST standart, kaotik katman yok). Paroladan anahtar: **Argon2id** (yeni dosyalar) veya PBKDF2 (eski dosyalar, geri uyumlu). Windows, Linux, macOS.
+Platform-independent encryption. **Kyber:** NIST FIPS 203 ML-KEM (Kyber-768), kuantum direnci. **Kaotik modu:** 8 katman hibrit kaotik + permütasyon + S-box + AES-256-GCM. **AES modu:** yalnizca AES-256-GCM (NIST standart), yani kaotik katman bu modda bilincli olarak kapali. Paroladan anahtar: **Argon2id** (yeni dosyalar) veya PBKDF2 (eski dosyalar, geri uyumlu). Windows, Linux, macOS.
+
+Kisa ozet: Kaotiklik bu projede vardir ve ana moddur; sadece `--mode aes` secilirse kaotik katman kullanilmaz.
 
 ---
 
