@@ -210,7 +210,7 @@ npm run tauri build
 
 | Konu | Açıklama |
 |------|----------|
-| **f64 (kaotik)** | Kaotik modda `f64` kullanılıyor. Rust IEEE 754’e uygun; aynı derleme (aynı hedef, aynı `--release`) pratikte platformda tutarlı sonuç verir. Başka dilde (Python/JS) aynı kaotik katmanı port ederseniz f64 davranışı farklı olabilir; böyle senaryoda **AES** veya **Kyber** modu tercih edin. |
+| **Integer kaotik çekirdek** | Kaotik modda f64 yerine tam sayı tabanlı durum geçişleri kullanılır. Bu, platformlar arası deterministik davranışı güçlendirir ve sayısal farklılık riskini düşürür. |
 | **Kaotik + büyük dosya** | Kaotik mod tüm plaintext’i belleğe alır (8 katman XOR + permütasyon + S-box). Çok büyük dosyalar için **AES modu** (streaming) kullanın. |
 | **S-box determinizm** | S-box sıralaması artık eşit `f64` değerlerde indeks ile kırılıyor; platformlar arası aynı girdi → aynı S-box. |
 | **Zayıf parola listesi** | Yalnızca sınırlı sayıda yaygın parola engelleniyor. Yüksek güvenlik ortamlarında harici liste (örn. rockyou) veya parola gücü (zxcvbn) entegrasyonu düşünülebilir. |
