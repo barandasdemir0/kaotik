@@ -1,21 +1,71 @@
-// Çok katmanlı kaotik sistem: Lojistik, Henon, Lorenz, Rössler, Tent, Cubic;
-// çapraz bağlama, bayt permütasyonu, S-box. Analiz edilmesi son derece zor.
+// Çok katmanlı kaotik sistem: tam sayı tabanlı lojistik/henon/lorenz/rossler/tent/cubic benzeri
+// durum geçişleri, çapraz bağlama, bayt permütasyonu ve S-box ile çalışır.
 use crate::crypto;
 use crate::error::Result;
 
 const LAYERS: u32 = 8;
-const LORENZ_DT: f64 = 0.01;
-const LORENZ_ITER: usize = 50;
-const ROSSLER_DT: f64 = 0.02;
-const ROSSLER_ITER: usize = 30;
+const WARMUP_ROUNDS: usize = 512;
+const INNER_ROUNDS: usize = 8;
 
 #[inline(always)]
-fn wrap01(x: f64) -> f64 {
-    let mut v = x % 1.0;
-    if v < 0.0 {
-        v += 1.0;
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e3779b97f4a7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+
+#[inline(always)]
+fn logistic_step(x: u64, r: u64) -> u64 {
+    let folded = ((x as u128 * (!x) as u128) >> 32) as u64;
+    folded.wrapping_add(r).rotate_left(11) ^ 0xa0761d6478bd642f
+}
+
+#[inline(always)]
+fn henon_step(x: u64, y: u64, a: u64, b: u64) -> (u64, u64) {
+    let nx = y
+        .wrapping_add(a.wrapping_mul(x.rotate_left(19)))
+        .wrapping_add(0x9e3779b97f4a7c15);
+    let ny = b
+        .wrapping_mul(x ^ y.rotate_right(7))
+        .wrapping_add(0x517cc1b727220a95);
+    (nx, ny)
+}
+
+#[inline(always)]
+fn lorenz_mix(x: u64, y: u64, z: u64, sigma: u64, rho: u64, beta: u64) -> (u64, u64, u64) {
+    let nx = x.wrapping_add((y ^ z).rotate_left((sigma as u32 & 31) + 1));
+    let ny = y.wrapping_add((x ^ rho).rotate_right((beta as u32 & 31) + 1));
+    let nz = z.wrapping_add((x.wrapping_mul(y) ^ sigma).rotate_left((rho as u32 & 31) + 1));
+    (nx, ny, nz)
+}
+
+#[inline(always)]
+fn rossler_mix(x: u64, y: u64, z: u64, a: u64, b: u64, c: u64) -> (u64, u64, u64) {
+    let nx = (x.wrapping_sub(y).wrapping_sub(z)).rotate_left((a as u32 & 31) + 1);
+    let ny = x.wrapping_add(a.wrapping_mul(y)).rotate_right((b as u32 & 31) + 1);
+    let nz = b
+        .wrapping_add(z.wrapping_mul(x.wrapping_sub(c)))
+        .rotate_left((c as u32 & 31) + 1);
+    (nx, ny, nz)
+}
+
+#[inline(always)]
+fn tent_step(x: u64, mu: u64) -> u64 {
+    let threshold = mu | 1;
+    if x < threshold {
+        x.wrapping_shl(1) ^ mu.rotate_left(3)
+    } else {
+        (!x).wrapping_shl(1).wrapping_add(mu.rotate_right(5))
     }
-    v
+}
+
+#[inline(always)]
+fn cubic_step(x: u64, r: u64) -> u64 {
+    x.wrapping_mul(x)
+        .wrapping_mul(x)
+        .wrapping_add(r.rotate_left(13))
 }
 
 /// Önceki katman çıktısının hash'i (None = ilk katman). Avalanche etkisini artırır.
@@ -24,78 +74,44 @@ fn derive_extended_params(
     salt: &[u8],
     layer: u32,
     prev_layer_hash: Option<&[u8; 32]>,
-) -> [f64; 12] {
+) -> [u64; 12] {
     use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(password.as_bytes());
-    hasher.update(layer.to_le_bytes());
-    hasher.update(salt);
+    let mut seed = Sha256::new();
+    seed.update(password.as_bytes());
+    seed.update(layer.to_le_bytes());
+    seed.update(salt);
     if let Some(prev) = prev_layer_hash {
-        hasher.update(prev);
+        seed.update(prev);
     }
-    let h = hasher.finalize();
-    let mut p = [0.0_f64; 12];
-    for (i, slot) in p.iter_mut().enumerate() {
-        let j = i * 2;
-        let v = u16::from_le_bytes([h[j % 32], h[(j + 1) % 32]]) as f64 / 65535.0;
-        *slot = v;
+    let base = seed.finalize();
+
+    let mut out = [0u64; 12];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let mut h = Sha256::new();
+        h.update(base);
+        h.update((i as u64).to_le_bytes());
+        let d = h.finalize();
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&d[..8]);
+        *slot = u64::from_le_bytes(bytes) | 1;
     }
-    p[0] = 0.1 + p[0] * 0.8;
-    p[1] += 3.5;
-    p[2] = 1.4 + p[2] * 0.1;
-    p[3] = 0.3 + p[3] * 0.1;
-    p[4] = 10.0 + p[4] * 5.0;
-    p[5] = 28.0 + p[5] * 5.0;
-    p[6] = 2.0 + p[6] * 2.0;
-    p[7] = 0.1 + p[7] * 0.4;
-    p[8] = 0.1 + p[8] * 0.4;
-    p[9] = 14.0 + p[9] * 5.0;
-    p[10] = 0.4 + p[10] * 0.2;
-    p[11] = 2.5 + p[11] * 0.5;
-    p
+
+    out[0] ^= 0x243f6a8885a308d3;
+    out[1] ^= 0x13198a2e03707344;
+    out[2] ^= 0xa4093822299f31d0;
+    out[3] ^= 0x082efa98ec4e6c89;
+    out[4] ^= 0x452821e638d01377;
+    out[5] ^= 0xbe5466cf34e90c6c;
+    out[6] ^= 0xc0ac29b7c97c50dd;
+    out[7] ^= 0x3f84d5b5b5470917;
+    out[8] ^= 0x9216d5d98979fb1b;
+    out[9] ^= 0xd1310ba698dfb5ac;
+    out[10] ^= 0x2ffd72dbd01adfb7;
+    out[11] ^= 0xb8e1afed6a267e96;
+    out
 }
 
-fn lorenz_step(x: &mut f64, y: &mut f64, z: &mut f64, sigma: f64, rho: f64, beta: f64) {
-    let dx = sigma * (*y - *x);
-    let dy = *x * (rho - *z) - *y;
-    let dz = *x * *y - beta * *z;
-    *x += LORENZ_DT * dx;
-    *y += LORENZ_DT * dy;
-    *z += LORENZ_DT * dz;
-    // NaN/Inf koruması: kaotik dizi sapmasını önle
-    if !x.is_finite() { *x = 0.1; }
-    if !y.is_finite() { *y = 0.0; }
-    if !z.is_finite() { *z = 0.0; }
-}
-
-fn rossler_step(x: &mut f64, y: &mut f64, z: &mut f64, a: f64, b: f64, c: f64) {
-    let dx = -*y - *z;
-    let dy = *x + a * *y;
-    let dz = b + *z * (*x - c);
-    *x += ROSSLER_DT * dx;
-    *y += ROSSLER_DT * dy;
-    *z += ROSSLER_DT * dz;
-    // NaN/Inf koruması: kaotik dizi sapmasını önle
-    if !x.is_finite() { *x = 0.1; }
-    if !y.is_finite() { *y = 0.0; }
-    if !z.is_finite() { *z = 0.0; }
-}
-
-fn tent_map(x: f64, mu: f64) -> f64 {
-    // mu=0 veya mu=1 olursa sıfıra bölme; epsilon ile sınırla
-    let mu = mu.clamp(1e-10, 1.0 - 1e-10);
-    if x < mu {
-        x / mu
-    } else {
-        (1.0 - x) / (1.0 - mu)
-    }
-}
-
-fn cubic_map(x: f64, r: f64) -> f64 {
-    r * x * (1.0 - x * x)
-}
-
-fn chaotic_sequence_to_prk(sequence: &[f64], password: &str, salt: &[u8]) -> Vec<u8> {
+fn chaotic_sequence_to_prk(sequence: &[u64], password: &str, salt: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     let mut chaotic_bytes = Vec::with_capacity(sequence.len() * 8);
     for &v in sequence {
@@ -110,7 +126,7 @@ fn chaotic_sequence_to_prk(sequence: &[f64], password: &str, salt: &[u8]) -> Vec
 }
 
 pub fn generate_chaotic_key_hkdf(
-    chaotic_sequence: &[f64],
+    chaotic_sequence: &[u64],
     password: &str,
     salt: &[u8],
     length: usize,
@@ -119,96 +135,108 @@ pub fn generate_chaotic_key_hkdf(
     crypto::hkdf_expand(&prk, b"kaotik-key", length, Some(salt))
 }
 
-/// Hibrit kaotik dizi: Lojistik + Henon + Lorenz + Rössler + Tent + Cubic çapraz bağlamalı.
-/// prev_layer_hash: önceki katman dizisinin SHA-256'ı (ilk katmanda None).
+/// Hibrit kaotik dizi: tam sayı tabanlı 6 farklı durum geçişinin çapraz bağlanmış birleşimi.
 fn generate_hybrid_sequence(
     password: &str,
     salt: &[u8],
     layer: u32,
     length: usize,
     prev_layer_hash: Option<&[u8; 32]>,
-) -> Vec<f64> {
+) -> Vec<u64> {
     let p = derive_extended_params(password, salt, layer, prev_layer_hash);
-    let (x0, r, a_henon, b_henon) = (p[0], p[1], p[2], p[3]);
-    let (sigma, rho, beta) = (p[4], p[5], p[6]);
-    let (a_r, b_r, c_r) = (p[7], p[8], p[9]);
-    let (mu, r_cubic) = (p[10], p[11]);
-
     let mut out = Vec::with_capacity(length);
-    let mut x_log = x0;
-    let mut hx: f64;
-    let mut hy = 0.0_f64;
-    let mut lx = 0.1 + (x0 * 10.0) % 5.0;
-    let mut ly = 0.0;
-    let mut lz = 0.0;
-    let mut rx = 0.1;
-    let mut ry = 0.0;
-    let mut rz = 0.0;
-    let mut x_tent = wrap01(x0);
-    let mut x_cubic = wrap01(x0 + 0.1);
 
-    for _ in 0..1000 {
-        x_log = r * x_log * (1.0 - x_log);
+    let mut seed = p[0] ^ p[5].rotate_left(7) ^ p[11].rotate_right(9);
+    let mut x_log = splitmix64(&mut seed);
+    let mut hx = splitmix64(&mut seed);
+    let mut hy = splitmix64(&mut seed);
+    let mut lx = splitmix64(&mut seed);
+    let mut ly = splitmix64(&mut seed);
+    let mut lz = splitmix64(&mut seed);
+    let mut rx = splitmix64(&mut seed);
+    let mut ry = splitmix64(&mut seed);
+    let mut rz = splitmix64(&mut seed);
+    let mut x_tent = splitmix64(&mut seed);
+    let mut x_cubic = splitmix64(&mut seed);
+
+    for _ in 0..WARMUP_ROUNDS {
+        x_log = logistic_step(x_log, p[1]);
+        (hx, hy) = henon_step(hx, hy, p[2], p[3]);
+        (lx, ly, lz) = lorenz_mix(lx, ly, lz, p[4], p[5], p[6]);
+        (rx, ry, rz) = rossler_mix(rx, ry, rz, p[7], p[8], p[9]);
+        x_tent = tent_step(x_tent, p[10]);
+        x_cubic = cubic_step(x_cubic, p[11]);
+        seed ^= x_log ^ hx ^ hy ^ lx ^ ly ^ lz ^ rx ^ ry ^ rz ^ x_tent ^ x_cubic;
+        let _ = splitmix64(&mut seed);
     }
 
     for _ in 0..length {
-        for _ in 0..10 {
-            x_log = r * x_log * (1.0 - x_log);
+        for _ in 0..INNER_ROUNDS {
+            x_log = logistic_step(x_log ^ seed, p[1]);
+            (hx, hy) = henon_step(hx ^ x_log, hy ^ seed, p[2], p[3]);
+            (lx, ly, lz) = lorenz_mix(lx ^ hy, ly ^ hx, lz ^ x_log, p[4], p[5], p[6]);
+            (rx, ry, rz) = rossler_mix(rx ^ ly, ry ^ lz, rz ^ lx, p[7], p[8], p[9]);
+            x_tent = tent_step(x_tent ^ rz, p[10]);
+            x_cubic = cubic_step(x_cubic ^ rx, p[11]);
+            seed ^= x_log
+                .wrapping_add(hx)
+                .wrapping_add(hy)
+                .wrapping_add(lx)
+                .wrapping_add(ly)
+                .wrapping_add(lz)
+                .wrapping_add(rx)
+                .wrapping_add(ry)
+                .wrapping_add(rz)
+                .wrapping_add(x_tent)
+                .wrapping_add(x_cubic);
+            let _ = splitmix64(&mut seed);
         }
-        hx = x_log;
-        let nhx = 1.0 - a_henon * hx * hx + hy;
-        let nhy = b_henon * hx;
-        hx = nhx;
-        hy = nhy;
-
-        for _ in 0..LORENZ_ITER {
-            lorenz_step(&mut lx, &mut ly, &mut lz, sigma, rho, beta);
-        }
-        for _ in 0..ROSSLER_ITER {
-            rossler_step(&mut rx, &mut ry, &mut rz, a_r, b_r, c_r);
-        }
-        x_tent = wrap01(tent_map(x_tent, mu));
-        x_cubic = wrap01(cubic_map(x_cubic, r_cubic));
-
-        let l_norm = wrap01((lx.abs() + ly.abs() + lz.abs()) / 50.0);
-        let r_norm = wrap01((rx.abs() + ry.abs() + rz.abs()) / 20.0);
-        // Ağırlıklar toplamı = 1.0 (6 harita eşit etki görmemeli ama normalize olmalı)
-        let combined = wrap01(x_log) * (1.0 / 6.0)
-            + wrap01(hx.abs()) * (1.0 / 6.0)
-            + l_norm * (1.0 / 6.0)
-            + r_norm * (1.0 / 6.0)
-            + x_tent * (1.0 / 6.0)
-            + x_cubic * (1.0 / 6.0);
-        out.push(wrap01(combined));
+        let mut mixed = x_log
+            ^ hx
+            ^ hy
+            ^ lx
+            ^ ly
+            ^ lz
+            ^ rx
+            ^ ry
+            ^ rz
+            ^ x_tent
+            ^ x_cubic
+            ^ seed;
+        mixed ^= mixed.rotate_left((p[0] as u32 & 31) + 1);
+        mixed = splitmix64(&mut mixed);
+        out.push(mixed);
+        seed ^= mixed;
     }
+
     out
 }
 
 /// S-box (256 byte) kaotik orbit ile türetilir: sbox[i] = permütasyon(i)
 fn chaos_sbox(
-    _sequence: &[f64],
+    sequence: &[u64],
     password: &str,
     salt: &[u8],
     layer: u32,
     prev_layer_hash: Option<&[u8; 32]>,
 ) -> [u8; 256] {
-    let mut idx_val: Vec<(f64, u8)> = (0..256).map(|i| (0.0_f64, i as u8)).collect();
+    let mut idx_val: Vec<(u64, u8)> = (0..256).map(|i| (0_u64, i as u8)).collect();
     let p = derive_extended_params(password, salt, layer, prev_layer_hash);
-    let mut x = p[0];
-    for entry in idx_val.iter_mut().take(256) {
-        x = 3.9 * x * (1.0 - x);
-        x = (x * 1.0 + p[1] * (1.0 - x)) % 1.0;
-        if x < 0.0 {
-            x += 1.0;
-        }
-        entry.0 = x;
+    let seq_seed = if sequence.is_empty() { 0 } else { sequence[0] };
+    let mut seed = p[0] ^ p[1] ^ seq_seed ^ ((layer as u64) << 48);
+
+    for (i, entry) in idx_val.iter_mut().enumerate() {
+        let seq_mix = if sequence.is_empty() {
+            (i as u64).wrapping_mul(0x9e3779b97f4a7c15)
+        } else {
+            sequence[i % sequence.len()]
+        };
+        seed ^= seq_mix.rotate_left((p[2] as u32 & 31) + 1);
+        let key = splitmix64(&mut seed) ^ p[i % p.len()];
+        entry.0 = key;
     }
-    // Sıralama deterministik: aynı f64 değerlerde indeks (a.1) ile ayır. Platformlar arası tutarlı S-box.
-    idx_val.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.1.cmp(&b.1))
-    });
+
+    idx_val.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     let mut sbox = [0u8; 256];
     for (i, &(_, b)) in idx_val.iter().enumerate() {
         sbox[i] = b;
@@ -225,10 +253,15 @@ fn inv_sbox(sbox: &[u8; 256]) -> [u8; 256] {
 }
 
 /// Permütasyon indeksi: chaos dizisinden deterministik shuffle
-fn chaos_permutation(sequence: &[f64], length: usize) -> Vec<usize> {
+fn chaos_permutation(sequence: &[u64], length: usize) -> Vec<usize> {
     let mut perm: Vec<usize> = (0..length).collect();
     for i in (1..length).rev() {
-        let j = (sequence[i % sequence.len()] * (i + 1) as f64).floor() as usize % (i + 1);
+        let sample = if sequence.is_empty() {
+            (i as u64).wrapping_mul(0x9e3779b97f4a7c15)
+        } else {
+            sequence[i % sequence.len()]
+        };
+        let j = (sample as usize) % (i + 1);
         perm.swap(i, j);
     }
     perm

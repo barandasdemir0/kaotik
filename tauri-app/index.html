@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kaotik Control Plane</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="orb orb-a"></div>
+    <div class="orb orb-b"></div>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">Kaotik Cipher Stack</p>
+        <h1>Cross-Platform Control Plane</h1>
+        <p class="subtitle">
+          Rust core + Tauri UI. Kaotik, AES ve Kyber modlarini tek panelden yonet.
+        </p>
+      </header>
+
+      <section class="panel">
+        <div class="grid two">
+          <label>
+            Islem
+            <select id="operation">
+              <option value="encrypt">Encrypt</option>
+              <option value="decrypt">Decrypt</option>
+              <option value="verify">Verify</option>
+            </select>
+          </label>
+
+          <label>
+            Mod
+            <select id="mode">
+              <option value="kaotik">Kaotik</option>
+              <option value="aes">AES</option>
+              <option value="kyber">Kyber</option>
+            </select>
+          </label>
+        </div>
+
+        <label>
+          Input Dosyasi
+          <div class="with-btn">
+            <input id="inputPath" placeholder="Input file path" />
+            <button id="pickInput" type="button">Sec</button>
+          </div>
+        </label>
+
+        <label id="outputWrap">
+          Output Dosyasi
+          <div class="with-btn">
+            <input id="outputPath" placeholder="Output file path" />
+            <button id="pickOutput" type="button">Sec</button>
+          </div>
+        </label>
+
+        <label>
+          Parola
+          <input id="password" type="password" placeholder="En az 16 karakter" />
+        </label>
+
+        <label id="keyWrap" class="hidden">
+          Kyber Key Dosyasi
+          <div class="with-btn">
+            <input id="keyPath" placeholder=".key file path" />
+            <button id="pickKey" type="button">Sec</button>
+          </div>
+        </label>
+
+        <div class="actions">
+          <button id="validatePassword" type="button" class="ghost">Parola Kontrol</button>
+          <button id="runAction" type="button" class="primary">Calistir</button>
+        </div>
+      </section>
+
+      <section class="status-box">
+        <p class="status-title">Durum</p>
+        <pre id="status">Hazir.</pre>
+      </section>
+    </main>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

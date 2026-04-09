@@ -202,10 +202,12 @@ Başarı metriği:
 6. [x] CI determinism adımı: `test_kaotik_layers_deterministic_with_fixed_salt`
 7. [x] CI platform matrisi: Windows + Linux + macOS
 8. [x] README KDF parametreleri ve nonce/salt politikası netleştirildi
+9. [x] Kaotik motor `f64` yerine tam sayı tabanlı deterministik yapıya taşındı
+10. [x] Tauri tabanlı cross-platform GUI iskeleti eklendi (`tauri-app/`)
 
 ### Kalan maddeler (operasyonel/uzun vadeli)
 
 1. [ ] Bağımsız güvenlik denetimi
 2. [ ] Geniş benchmark raporu (küçük/orta/büyük dosya setleri)
-3. [ ] GUI akışında kaotik modun ana tercih olarak UX sertleştirmesi
-4. [ ] Release otomasyonu ve paketleme dağıtımı
+3. [ ] Tauri GUI akışında kaotik modun ana tercih olarak UX sertleştirmesi
+4. [ ] Tauri release otomasyonu ve paketleme dağıtımı

@@ -178,6 +178,30 @@ cargo build --release --features ffi
 
 Oluşan kütüphanede `kaotik_encrypt_aes`, `kaotik_decrypt_aes`, `kaotik_verify_file` export edilir. Header üretmek için `cbindgen` kullanılabilir.
 
+## Tauri GUI (cross-platform)
+
+Rust motorunun ustune Tauri tabanli bir masaustu arayuzu eklendi:
+
+1. Konum: `tauri-app/`
+2. Destek: Windows, Linux, macOS
+3. Akislar: encrypt, decrypt, verify ve parola politikasi dogrulama
+
+Calistirma:
+
+```bash
+cd tauri-app
+npm install
+npm run tauri dev
+```
+
+Uretim build:
+
+```bash
+cd tauri-app
+npm install
+npm run tauri build
+```
+
 ## WASM
 
 `wasm` feature ile (Kyber hariç) `wasm32-unknown-unknown` hedeflenebilir. Bazı bağımlılıklar WASM’de sınırlı olduğu için ayrı bir feature/alt crate ile denemeniz gerekebilir.
