@@ -1,5 +1,6 @@
 //! Parola kuralları: uzunluk, büyük harf/rakam/özel karakter, zayıf parola listesi.
 use crate::error::{Error, Result};
+use subtle::ConstantTimeEq;
 
 const MIN_LENGTH: usize = 16;
 /// Yaygın zayıf parolalar (küçük harf eşleştirmesi).
@@ -26,10 +27,11 @@ pub fn validate_password(password: &str) -> Result<()> {
             "Password must be at least 16 characters".into(),
         ));
     }
-    if WEAK_PASSWORDS
+    let lowered = password.to_lowercase();
+    let has_weak = WEAK_PASSWORDS
         .iter()
-        .any(|w| password.to_lowercase() == *w)
-    {
+        .any(|w| lowered.as_bytes().ct_eq(w.as_bytes()).unwrap_u8() == 1);
+    if has_weak {
         return Err(Error::Password("Password is in weak password list".into()));
     }
     let has_upper = password.chars().any(|c| c.is_uppercase());

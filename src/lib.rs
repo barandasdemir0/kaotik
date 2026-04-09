@@ -20,10 +20,13 @@ pub use format::{
     write_encrypted_secret_key, write_aes_chunked_start,
     write_kyber_payload, read_kyber_payload,
     FORMAT_AES, FORMAT_KAOTIK, FORMAT_KYBER,
-    VERSION_AES_CHUNKED, VERSION_CURRENT, VERSION_LEGACY,
+    VERSION_AES_CHUNKED, VERSION_CURRENT, VERSION_KAOTIK_PADDED, VERSION_LEGACY,
 };
 
 use std::io::{Read, Write};
+use std::thread;
+use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 /// AES streaming: blok boyutu (64 KiB); büyük dosyalar bellekte tutulmaz.
 const AES_CHUNK_SIZE: usize = 64 * 1024;
@@ -31,6 +34,58 @@ const AES_CHUNK_SIZE: usize = 64 * 1024;
 const MAX_AES_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 /// Kaotik mod maksimum plaintext boyutu (256 MiB). Daha büyük dosyalar için AES modu kullanın.
 const MAX_KAOTIK_SIZE: usize = 256 * 1024 * 1024;
+/// Kaotik boyut gizleme için dolgu hedef bloğu.
+const KAOTIK_PAD_BLOCK: usize = 256;
+/// Ek rastgele dolgu blok üst sınırı.
+const KAOTIK_PAD_EXTRA_MAX_BLOCKS: usize = 8;
+/// Kaotik dolgu üst sınırı: len-prefix + hizalama + ekstra bloklar.
+const MAX_KAOTIK_PADDING_OVERHEAD: usize = 8 + (KAOTIK_PAD_BLOCK - 1) + KAOTIK_PAD_EXTRA_MAX_BLOCKS * KAOTIK_PAD_BLOCK;
+/// Yan-kanal zaman farkını azaltmak için minimum decrypt süresi.
+const MIN_DECRYPT_DURATION: Duration = Duration::from_millis(120);
+
+#[inline]
+fn enforce_min_decrypt_duration(start: Instant) {
+    let elapsed = start.elapsed();
+    if elapsed < MIN_DECRYPT_DURATION {
+        thread::sleep(MIN_DECRYPT_DURATION - elapsed);
+    }
+}
+
+fn apply_random_padding(plain: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let mut chooser = [0u8; 1];
+    crypto::random_bytes(&mut chooser)?;
+    let extra_blocks = (chooser[0] as usize) % (KAOTIK_PAD_EXTRA_MAX_BLOCKS + 1);
+
+    let base_len = 8 + plain.len();
+    let aligned = base_len.div_ceil(KAOTIK_PAD_BLOCK) * KAOTIK_PAD_BLOCK;
+    let target_len = aligned + (extra_blocks * KAOTIK_PAD_BLOCK);
+    let pad_len = target_len.saturating_sub(base_len);
+
+    let mut out = Zeroizing::new(Vec::with_capacity(target_len));
+    out.extend_from_slice(&(plain.len() as u64).to_le_bytes());
+    out.extend_from_slice(plain);
+    if pad_len > 0 {
+        let mut pad = vec![0u8; pad_len];
+        crypto::random_bytes(&mut pad)?;
+        out.extend_from_slice(&pad);
+        crypto::secure_zero(&mut pad);
+    }
+    Ok(out)
+}
+
+fn remove_random_padding(padded: &[u8]) -> Result<Vec<u8>> {
+    if padded.len() < 8 {
+        return Err(Error::Crypto("Decryption failed".into()));
+    }
+    let mut len_bytes = [0u8; 8];
+    len_bytes.copy_from_slice(&padded[..8]);
+    let real_len = u64::from_le_bytes(len_bytes) as usize;
+    let payload = &padded[8..];
+    if real_len > payload.len() {
+        return Err(Error::Crypto("Decryption failed".into()));
+    }
+    Ok(payload[..real_len].to_vec())
+}
 
 /// Kaotik mod: parola + 8 katman kaotik (XOR, permütasyon, S-box) + AES-256-GCM. Tek seferde belleğe alır; büyük dosya için AES modu kullanın.
 pub fn encrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password: &str) -> Result<()> {
@@ -39,7 +94,7 @@ pub fn encrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password:
     let nonce = crypto::gen_nonce()?;
     let kdf = crypto::KDF_ARGON2;
     let mut key = crypto::derive_key(password, &salt, kdf)?;
-    let mut plaintext = Vec::new();
+    let mut plaintext = Zeroizing::new(Vec::new());
     reader.read_to_end(&mut plaintext)?;
     if plaintext.len() > MAX_KAOTIK_SIZE {
         crypto::secure_zero(&mut key);
@@ -48,10 +103,11 @@ pub fn encrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password:
             plaintext.len(), MAX_KAOTIK_SIZE
         )));
     }
-    chaotic::apply_chaotic_xor_layers(&mut plaintext, password, &salt)?;
-    let ciphertext_with_tag = crypto::aes_gcm_encrypt(&key, &nonce, &plaintext)?;
+    let mut padded = apply_random_padding(&plaintext)?;
+    chaotic::apply_chaotic_xor_layers(&mut padded, password, &salt)?;
+    let ciphertext_with_tag = crypto::aes_gcm_encrypt(&key, &nonce, &padded)?;
     crypto::secure_zero(plaintext.as_mut_slice());
-    format::write_header(&mut writer, format::VERSION_CURRENT, format::FORMAT_KAOTIK)?;
+    format::write_header(&mut writer, format::VERSION_KAOTIK_PADDED, format::FORMAT_KAOTIK)?;
     format::write_kaotik_payload(&mut writer, &salt, kdf, &nonce, &ciphertext_with_tag)?;
     crypto::secure_zero(&mut key);
     Ok(())
@@ -59,22 +115,33 @@ pub fn encrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password:
 
 /// Kaotik mod dosyasını parola ile çözer.
 pub fn decrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password: &str) -> Result<()> {
-    validate_password(password)?;
-    let (version, format_byte) = format::read_header(&mut reader)?;
-    if format_byte != format::FORMAT_KAOTIK {
-        return Err(Error::Format("Not a Kaotik format file".into()));
-    }
-    let (salt, kdf, nonce, ciphertext_with_tag) = format::read_kaotik_payload(&mut reader, version)?;
-    if ciphertext_with_tag.len() > MAX_KAOTIK_SIZE + 32 {
-        return Err(Error::Format("Kaotik ciphertext too large".into()));
-    }
-    let mut key = crypto::derive_key(password, &salt, kdf)?;
-    let mut plaintext = crypto::aes_gcm_decrypt(&key, &nonce, &ciphertext_with_tag)?;
-    chaotic::reverse_chaotic_xor_layers(&mut plaintext, password, &salt)?;
-    writer.write_all(&plaintext)?;
-    crypto::secure_zero(plaintext.as_mut_slice());
-    crypto::secure_zero(&mut key);
-    Ok(())
+    let start = Instant::now();
+    let result = (|| {
+        validate_password(password)?;
+        let (version, format_byte) = format::read_header(&mut reader)?;
+        if format_byte != format::FORMAT_KAOTIK {
+            return Err(Error::Format("Not a Kaotik format file".into()));
+        }
+        let (salt, kdf, nonce, ciphertext_with_tag) = format::read_kaotik_payload(&mut reader, version)?;
+        if ciphertext_with_tag.len() > MAX_KAOTIK_SIZE + MAX_KAOTIK_PADDING_OVERHEAD + 32 {
+            return Err(Error::Format("Kaotik ciphertext too large".into()));
+        }
+        let mut key = crypto::derive_key(password, &salt, kdf)?;
+        let mut padded_plain = Zeroizing::new(crypto::aes_gcm_decrypt(&key, &nonce, &ciphertext_with_tag)?);
+        chaotic::reverse_chaotic_xor_layers(&mut padded_plain, password, &salt)?;
+        let mut final_plain = if version >= format::VERSION_KAOTIK_PADDED {
+            Zeroizing::new(remove_random_padding(&padded_plain)?)
+        } else {
+            Zeroizing::new(padded_plain.to_vec())
+        };
+        writer.write_all(&final_plain)?;
+        crypto::secure_zero(final_plain.as_mut_slice());
+        crypto::secure_zero(padded_plain.as_mut_slice());
+        crypto::secure_zero(&mut key);
+        Ok(())
+    })();
+    enforce_min_decrypt_duration(start);
+    result
 }
 
 /// Kyber mod: NIST ML-KEM Kyber-768. Paylaşılan gizlilik AES anahtarı olur; gizli anahtar `secret_key_out`'a parola ile şifrelenmiş yazılır.
@@ -95,7 +162,7 @@ pub fn encrypt_kyber<R: Read, W: Write>(
         .try_into()
         .map_err(|_| Error::Crypto("Kyber shared secret too short".into()))?;
     let nonce = crypto::gen_nonce()?;
-    let mut plaintext = Vec::new();
+    let mut plaintext = Zeroizing::new(Vec::new());
     reader.read_to_end(&mut plaintext)?;
     let ciphertext_with_tag = crypto::aes_gcm_encrypt(&aes_key, &nonce, &plaintext)?;
     crypto::secure_zero(plaintext.as_mut_slice());
@@ -147,47 +214,52 @@ pub fn encrypt_aes<R: Read, W: Write>(mut reader: R, mut writer: W, password: &s
 
 /// AES modu dosyasını çözer. v4 (chunked) ve v3 (tek blok) format desteklenir.
 pub fn decrypt_aes<R: Read, W: Write>(mut reader: R, mut writer: W, password: &str) -> Result<()> {
-    validate_password(password)?;
-    let (version, format_byte) = format::read_header(&mut reader)?;
-    if format_byte != format::FORMAT_AES {
-        return Err(Error::Format("Not an AES format file".into()));
-    }
-    if version >= format::VERSION_AES_CHUNKED {
-        let (salt, kdf, base_nonce) = format::read_aes_chunked_start(&mut reader)?;
-        let mut key = crypto::derive_key(password, &salt, kdf)?;
-        let mut chunk_index: u32 = 0;
-        loop {
-            let mut len_buf = [0u8; 4];
-            reader.read_exact(&mut len_buf)?;
-            let len = u32::from_le_bytes(len_buf) as usize;
-            if len == 0 {
-                break;
-            }
-            if len > MAX_AES_CHUNK_SIZE {
-                crypto::secure_zero(&mut key);
-                return Err(Error::Format("Chunk size exceeds limit".into()));
-            }
-            let mut ct = vec![0u8; len];
-            reader.read_exact(&mut ct)?;
-            let nonce = crypto::nonce_for_chunk(&base_nonce, chunk_index);
-            let pt = crypto::aes_gcm_decrypt(&key, &nonce, &ct)?;
-            writer.write_all(&pt)?;
-            chunk_index = chunk_index.saturating_add(1);
-            if chunk_index == u32::MAX {
-                crypto::secure_zero(&mut key);
-                return Err(Error::Format("Too many chunks".into()));
-            }
+    let start = Instant::now();
+    let result = (|| {
+        validate_password(password)?;
+        let (version, format_byte) = format::read_header(&mut reader)?;
+        if format_byte != format::FORMAT_AES {
+            return Err(Error::Format("Not an AES format file".into()));
         }
-        crypto::secure_zero(&mut key);
-    } else {
-        let (salt, kdf, nonce, ciphertext_with_tag) = format::read_kaotik_payload(&mut reader, version)?;
-        let mut key = crypto::derive_key(password, &salt, kdf)?;
-        let mut plaintext = crypto::aes_gcm_decrypt(&key, &nonce, &ciphertext_with_tag)?;
-        writer.write_all(&plaintext)?;
-        crypto::secure_zero(plaintext.as_mut_slice());
-        crypto::secure_zero(&mut key);
-    }
-    Ok(())
+        if version >= format::VERSION_AES_CHUNKED {
+            let (salt, kdf, base_nonce) = format::read_aes_chunked_start(&mut reader)?;
+            let mut key = crypto::derive_key(password, &salt, kdf)?;
+            let mut chunk_index: u32 = 0;
+            loop {
+                let mut len_buf = [0u8; 4];
+                reader.read_exact(&mut len_buf)?;
+                let len = u32::from_le_bytes(len_buf) as usize;
+                if len == 0 {
+                    break;
+                }
+                if len > MAX_AES_CHUNK_SIZE {
+                    crypto::secure_zero(&mut key);
+                    return Err(Error::Format("Chunk size exceeds limit".into()));
+                }
+                let mut ct = vec![0u8; len];
+                reader.read_exact(&mut ct)?;
+                let nonce = crypto::nonce_for_chunk(&base_nonce, chunk_index);
+                let pt = crypto::aes_gcm_decrypt(&key, &nonce, &ct)?;
+                writer.write_all(&pt)?;
+                chunk_index = chunk_index.saturating_add(1);
+                if chunk_index == u32::MAX {
+                    crypto::secure_zero(&mut key);
+                    return Err(Error::Format("Too many chunks".into()));
+                }
+            }
+            crypto::secure_zero(&mut key);
+        } else {
+            let (salt, kdf, nonce, ciphertext_with_tag) = format::read_kaotik_payload(&mut reader, version)?;
+            let mut key = crypto::derive_key(password, &salt, kdf)?;
+            let mut plaintext = Zeroizing::new(crypto::aes_gcm_decrypt(&key, &nonce, &ciphertext_with_tag)?);
+            writer.write_all(&plaintext)?;
+            crypto::secure_zero(plaintext.as_mut_slice());
+            crypto::secure_zero(&mut key);
+        }
+        Ok(())
+    })();
+    enforce_min_decrypt_duration(start);
+    result
 }
 
 /// Kyber mod dosyasını çözer. Gizli anahtar `key_file_reader`'dan parola ile açılır; KEM decapsulate sonrası AES ile çözülür.
@@ -197,32 +269,37 @@ pub fn decrypt_kyber<R: Read, W: Write>(
     password: &str,
     key_file_reader: &mut dyn Read,
 ) -> Result<()> {
-    validate_password(password)?;
-    let (_key_ver, key_salt, key_kdf, key_nonce, encrypted_sk) = format::read_encrypted_secret_key(key_file_reader)?;
-    let mut key_file_key = crypto::derive_key(password, &key_salt, key_kdf)?;
-    let mut sk_bytes = crypto::aes_gcm_decrypt(&key_file_key, &key_nonce, &encrypted_sk)?;
-    crypto::secure_zero(&mut key_file_key);
-    let (_version, format_byte) = format::read_header(&mut reader)?;
-    if format_byte != format::FORMAT_KYBER {
+    let start = Instant::now();
+    let result = (|| {
+        validate_password(password)?;
+        let (_key_ver, key_salt, key_kdf, key_nonce, encrypted_sk) = format::read_encrypted_secret_key(key_file_reader)?;
+        let mut key_file_key = crypto::derive_key(password, &key_salt, key_kdf)?;
+        let mut sk_bytes = Zeroizing::new(crypto::aes_gcm_decrypt(&key_file_key, &key_nonce, &encrypted_sk)?);
+        crypto::secure_zero(&mut key_file_key);
+        let (_version, format_byte) = format::read_header(&mut reader)?;
+        if format_byte != format::FORMAT_KYBER {
+            crypto::secure_zero(sk_bytes.as_mut_slice());
+            return Err(Error::Format("Not a Kyber format file".into()));
+        }
+        let (kem_ct, nonce, ciphertext_with_tag) = format::read_kyber_payload(&mut reader)?;
+        let mut ss = Zeroizing::new(nist_kyber::decapsulate(&kem_ct, &sk_bytes)?);
         crypto::secure_zero(sk_bytes.as_mut_slice());
-        return Err(Error::Format("Not a Kyber format file".into()));
-    }
-    let (kem_ct, nonce, ciphertext_with_tag) = format::read_kyber_payload(&mut reader)?;
-    let mut ss = nist_kyber::decapsulate(&kem_ct, &sk_bytes)?;
-    crypto::secure_zero(sk_bytes.as_mut_slice());
-    if ss.len() < 32 {
+        if ss.len() < 32 {
+            crypto::secure_zero(ss.as_mut_slice());
+            return Err(Error::Crypto("Decryption failed".into()));
+        }
+        let mut aes_key: [u8; 32] = ss[..32]
+            .try_into()
+            .map_err(|_| Error::Crypto("Decryption failed".into()))?;
+        let mut plaintext = Zeroizing::new(crypto::aes_gcm_decrypt(&aes_key, &nonce, &ciphertext_with_tag)?);
+        writer.write_all(&plaintext)?;
+        crypto::secure_zero(plaintext.as_mut_slice());
         crypto::secure_zero(ss.as_mut_slice());
-        return Err(Error::Crypto("Decryption failed".into()));
-    }
-    let mut aes_key: [u8; 32] = ss[..32]
-        .try_into()
-        .map_err(|_| Error::Crypto("Decryption failed".into()))?;
-    let mut plaintext = crypto::aes_gcm_decrypt(&aes_key, &nonce, &ciphertext_with_tag)?;
-    writer.write_all(&plaintext)?;
-    crypto::secure_zero(plaintext.as_mut_slice());
-    crypto::secure_zero(ss.as_mut_slice());
-    crypto::secure_zero(&mut aes_key);
-    Ok(())
+        crypto::secure_zero(&mut aes_key);
+        Ok(())
+    })();
+    enforce_min_decrypt_duration(start);
+    result
 }
 
 /// Dosya yapısını doğrular (header + payload öneki). Parola veya içeriği çözmez.
@@ -441,6 +518,29 @@ mod tests {
         let meta_start = 7;
         let meta_end = meta_start + 32 + 1 + 12;
         assert_ne!(&first[meta_start..meta_end], &second[meta_start..meta_end]);
+    }
+
+    #[test]
+    fn test_kaotik_header_uses_padded_version() {
+        let plain = b"header version check";
+        let mut cipher = Vec::new();
+        encrypt_kaotik(Cursor::new(&plain[..]), &mut cipher, TEST_PASSWORD).unwrap();
+        let mut cur = Cursor::new(&cipher);
+        let (version, fmt) = read_header(&mut cur).unwrap();
+        assert_eq!(fmt, FORMAT_KAOTIK);
+        assert_eq!(version, format::VERSION_KAOTIK_PADDED);
+    }
+
+    #[test]
+    fn test_kaotik_random_padding_obfuscates_length() {
+        let plain = vec![0x42_u8; 1024];
+        let mut lengths = std::collections::BTreeSet::new();
+        for _ in 0..8 {
+            let mut cipher = Vec::new();
+            encrypt_kaotik(Cursor::new(&plain[..]), &mut cipher, TEST_PASSWORD).unwrap();
+            lengths.insert(cipher.len());
+        }
+        assert!(lengths.len() > 1, "random padding should produce varying ciphertext lengths");
     }
 
     #[test]

@@ -11,6 +11,8 @@ pub const VERSION_LEGACY: u16 = 2;
 pub const VERSION_CURRENT: u16 = 3;
 /// AES chunked streaming (büyük dosyalar).
 pub const VERSION_AES_CHUNKED: u16 = 4;
+/// Kaotik payload + rastgele dolgu (boyut gizleme).
+pub const VERSION_KAOTIK_PADDED: u16 = 5;
 
 pub const FORMAT_KAOTIK: u8 = 0x01;
 pub const FORMAT_KYBER: u8 = 0x02;

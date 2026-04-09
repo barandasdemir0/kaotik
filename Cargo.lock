@@ -360,6 +360,7 @@ dependencies = [
  "pqcrypto-kyber",
  "pqcrypto-traits",
  "sha2",
+ "subtle",
  "zeroize",
 ]
 
