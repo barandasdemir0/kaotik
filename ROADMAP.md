@@ -120,3 +120,70 @@ Bu belge tam tarama sonucu ve her kategoride **10/10** için gereken adımları 
 | **Ürün Olgunluğu** | CHANGELOG + SemVer + CI + (ops.) GUI + kurulum |
 
 Bu adımlar tamamlandıkça her kategori 10/10’a yaklaşır; en büyük etki CI, dokümantasyon ve (ürün için) GUI/kurulum olacaktır.
+
+---
+
+## Uygulama Planı (Kaotiklikten Ödün Vermeden)
+
+Bu bölümdeki ilke: kaotik katman kaldırılmayacak, zayıflatılmayacak ve varsayılan kullanıcı deneyiminde korunacak.
+
+### Değişmez Kurallar
+
+1. `kaotik` modu birinci sınıf mod olarak korunur.
+2. 8 katman mimari (XOR + permütasyon + S-box) korunur; sadeleştirme adı altında katman düşürülmez.
+3. Güvenlik iyileştirmeleri kaotik katmanın üstüne eklenir; yerine geçmez.
+4. `aes` modu performans/uyumluluk modu olarak kalır, kaotik moda alternatif ama ikame değildir.
+
+### Sprint 1 (1. Hafta) — Netlik ve Sözleşme
+
+1. README ve CLI yardım metninde mod ayrımı kesinleştir: `kaotik` varsayılan/ana mod, `aes` performans modu.
+2. Şifre dosya başlığında mod bilgisini doğrulama kuralı olarak sabitle.
+3. Kaotik mod için kabul testleri yaz: aynı girişte `encrypt -> decrypt` bire bir dönüş.
+
+Teslim kriteri:
+1. Dokümantasyon ve CLI metinlerinde kaotik önceliği açık.
+2. Testlerde kaotik mod regresyonsuz geçiyor.
+
+### Sprint 2 (2-3. Hafta) — Güvenlik Sertleştirme (Kaotik Korunarak)
+
+1. Parola türetme parametrelerini (Argon2id/PBKDF2) dokümante et ve testlerle sabitle.
+2. Bütünlük doğrulama akışını netleştir ve kaotik modda zorunlu hale getir.
+3. Salt/nonce tekrarını engelleyen korumaları testle doğrula.
+
+Teslim kriteri:
+1. Kaotik modda güvenlik kontrolleri yeşil.
+2. Eski dosyalarla geri uyumluluk bozulmuyor.
+
+### Sprint 3 (4-5. Hafta) — Taşınabilirlik ve Determinizm
+
+1. Windows/Linux/macOS üzerinde kaotik mod roundtrip test matrisi oluştur.
+2. `f64` tabanlı kaotik hesaplar için deterministik davranış testlerini CI'a ekle.
+3. Platform farkı görülen senaryoları kayıt altına al ve düzeltme planı üret.
+
+Teslim kriteri:
+1. 3 platformda kaotik mod fonksiyonel testleri geçiyor.
+2. Determinizm sapmaları raporlanmış ve sınıflandırılmış.
+
+### Sprint 4 (6-8. Hafta) — Performans ve Ürünleşme
+
+1. Kaotik mod için gerçek dosya benchmarkları çıkar (küçük/orta/büyük).
+2. GUI tarafında mod seçimini sadeleştir: kaotik önerilen, aes ileri seçenek.
+3. Sürüm notlarında kaotik mod iyileştirmelerini ayrı başlıkla yayınla.
+
+Teslim kriteri:
+1. Performans raporu var.
+2. Kullanıcı akışında kaotik mod görünür şekilde ana tercih.
+
+### Hızlı Başlangıç (Bu Hafta Yapılacaklar)
+
+1. README içinde "Kaotik modu ana moddur" ifadesini kontrol et (tamamlandıysa koru).
+2. Kaotik mod için 3 yeni test ekle:
+	- boş dosya
+	- tek byte
+	- yanlış parola
+3. CI'da kaotik mod testlerini ayrı adım olarak çalıştır.
+
+Başarı metriği:
+1. Kaotik mod test başarı oranı: %100
+2. Kaotik mod için kırıcı bug: 0
+3. Mod davranışı hakkında kullanıcı şikayeti: 0 kritik
