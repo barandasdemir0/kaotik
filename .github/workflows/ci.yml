@@ -26,6 +26,9 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Test (Kaotik focus)
+        run: cargo test --release test_kaotik_
+
       - name: Test
         run: cargo test --release
 

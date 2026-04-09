@@ -136,7 +136,7 @@ fn generate_hybrid_sequence(
 
     let mut out = Vec::with_capacity(length);
     let mut x_log = x0;
-    let mut hx = x0;
+    let mut hx: f64;
     let mut hy = 0.0_f64;
     let mut lx = 0.1 + (x0 * 10.0) % 5.0;
     let mut ly = 0.0;
@@ -186,7 +186,7 @@ fn generate_hybrid_sequence(
 
 /// S-box (256 byte) kaotik orbit ile türetilir: sbox[i] = permütasyon(i)
 fn chaos_sbox(
-    sequence: &[f64],
+    _sequence: &[f64],
     password: &str,
     salt: &[u8],
     layer: u32,
@@ -243,21 +243,11 @@ fn apply_permutation(data: &mut [u8], perm: &[usize]) {
     data.copy_from_slice(&out);
 }
 
-fn inv_perm(perm: &[usize]) -> Vec<usize> {
-    let n = perm.len();
-    let mut inv = vec![0; n];
-    for i in 0..n {
-        inv[perm[i]] = i;
-    }
-    inv
-}
-
 fn apply_permutation_inv(data: &mut [u8], perm: &[usize]) {
-    let inv = inv_perm(perm);
     let n = data.len();
     let mut out = vec![0u8; n];
     for i in 0..n {
-        out[i] = data[inv[i]];
+        out[i] = data[perm[i]];
     }
     data.copy_from_slice(&out);
 }

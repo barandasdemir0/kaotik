@@ -370,6 +370,26 @@ mod tests {
     }
 
     #[test]
+    fn test_kaotik_empty_roundtrip() {
+        let plain: &[u8] = &[];
+        let mut cipher = Vec::new();
+        encrypt_kaotik(Cursor::new(plain), &mut cipher, TEST_PASSWORD).unwrap();
+        let mut dec = Vec::new();
+        decrypt_kaotik(Cursor::new(&cipher), &mut dec, TEST_PASSWORD).unwrap();
+        assert!(dec.is_empty());
+    }
+
+    #[test]
+    fn test_kaotik_single_byte_roundtrip() {
+        let plain: &[u8] = &[0xAB];
+        let mut cipher = Vec::new();
+        encrypt_kaotik(Cursor::new(plain), &mut cipher, TEST_PASSWORD).unwrap();
+        let mut dec = Vec::new();
+        decrypt_kaotik(Cursor::new(&cipher), &mut dec, TEST_PASSWORD).unwrap();
+        assert_eq!(dec, plain);
+    }
+
+    #[test]
     fn test_corrupted_file_fails() {
         let mut dec = Vec::new();
         let bad: &[u8] = b"NOT_KAOS\x00\x00\x00";
