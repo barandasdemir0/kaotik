@@ -275,6 +275,8 @@ pub fn verify_file<R: Read>(mut reader: R) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chaotic;
+    use crate::crypto::SALT_LEN;
     use std::io::Cursor;
 
     const TEST_PASSWORD: &str = "TestPassword123!@#";
@@ -390,10 +392,55 @@ mod tests {
     }
 
     #[test]
+    fn test_kaotik_layers_deterministic_with_fixed_salt() {
+        let salt = [7u8; SALT_LEN];
+        let plain = b"Deterministic chaos layer check";
+        let mut first = plain.to_vec();
+        let mut second = plain.to_vec();
+
+        chaotic::apply_chaotic_xor_layers(&mut first, TEST_PASSWORD, &salt).unwrap();
+        chaotic::apply_chaotic_xor_layers(&mut second, TEST_PASSWORD, &salt).unwrap();
+        assert_eq!(first, second);
+
+        chaotic::reverse_chaotic_xor_layers(&mut first, TEST_PASSWORD, &salt).unwrap();
+        assert_eq!(first, plain);
+    }
+
+    #[test]
     fn test_corrupted_file_fails() {
         let mut dec = Vec::new();
         let bad: &[u8] = b"NOT_KAOS\x00\x00\x00";
         assert!(decrypt_kaotik(Cursor::new(bad), &mut dec, TEST_PASSWORD).is_err());
+    }
+
+    #[test]
+    fn test_kaotik_tampered_ciphertext_fails_auth() {
+        let plain = b"tamper me";
+        let mut cipher = Vec::new();
+        encrypt_kaotik(Cursor::new(&plain[..]), &mut cipher, TEST_PASSWORD).unwrap();
+
+        // Header(7) + salt(32) + kdf(1) + nonce(12) = ciphertext start.
+        let ct_offset = 7 + 32 + 1 + 12;
+        cipher[ct_offset] ^= 0x01;
+
+        let mut dec = Vec::new();
+        let err = decrypt_kaotik(Cursor::new(&cipher), &mut dec, TEST_PASSWORD).unwrap_err();
+        assert!(matches!(err, Error::Crypto(_)));
+    }
+
+    #[test]
+    fn test_kaotik_encrypt_uses_fresh_salt_and_nonce() {
+        let plain = b"same input, fresh metadata";
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+
+        encrypt_kaotik(Cursor::new(&plain[..]), &mut first, TEST_PASSWORD).unwrap();
+        encrypt_kaotik(Cursor::new(&plain[..]), &mut second, TEST_PASSWORD).unwrap();
+
+        // Header(7) sonrası metadata: salt(32) + kdf(1) + nonce(12).
+        let meta_start = 7;
+        let meta_end = meta_start + 32 + 1 + 12;
+        assert_ne!(&first[meta_start..meta_end], &second[meta_start..meta_end]);
     }
 
     #[test]

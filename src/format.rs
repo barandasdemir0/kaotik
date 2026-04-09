@@ -16,6 +16,9 @@ pub const FORMAT_KAOTIK: u8 = 0x01;
 pub const FORMAT_KYBER: u8 = 0x02;
 pub const FORMAT_AES: u8 = 0x03;
 
+pub type KaotikPayload = ([u8; SALT_LEN], u8, [u8; NONCE_LEN], Vec<u8>);
+pub type EncryptedSecretKeyPayload = (u8, [u8; SALT_LEN], u8, [u8; NONCE_LEN], Vec<u8>);
+
 pub fn write_header<W: Write>(w: &mut W, version: u16, format_byte: u8) -> Result<()> {
     w.write_all(MAGIC)?;
     w.write_all(&version.to_le_bytes())?;
@@ -57,7 +60,7 @@ pub fn write_kaotik_payload<W: Write>(
 pub fn read_kaotik_payload<R: Read>(
     r: &mut R,
     version: u16,
-) -> Result<([u8; SALT_LEN], u8, [u8; NONCE_LEN], Vec<u8>)> {
+) -> Result<KaotikPayload> {
     let mut salt = [0u8; SALT_LEN];
     r.read_exact(&mut salt)?;
     let kdf = if version >= VERSION_CURRENT {
@@ -159,7 +162,7 @@ pub fn write_encrypted_secret_key<W: Write + ?Sized>(
 /// version_byte: 3 = yeni (salt,kdf,nonce,ct), değilse eski (ilk okunan byte tuzun parçası: salt 31 okumak gerekir).
 pub fn read_encrypted_secret_key<R: Read + ?Sized>(
     r: &mut R,
-) -> Result<(u8, [u8; SALT_LEN], u8, [u8; NONCE_LEN], Vec<u8>)> {
+) -> Result<EncryptedSecretKeyPayload> {
     let mut first = [0u8; 1];
     r.read_exact(&mut first)?;
     let version = first[0];

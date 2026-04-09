@@ -187,3 +187,25 @@ Başarı metriği:
 1. Kaotik mod test başarı oranı: %100
 2. Kaotik mod için kırıcı bug: 0
 3. Mod davranışı hakkında kullanıcı şikayeti: 0 kritik
+
+---
+
+## Durum Güncellemesi (Uygulananlar)
+
+### Tamamlanan maddeler
+
+1. [x] Kaotik odaklı testler: boş veri, tek byte, yanlış parola, roundtrip
+2. [x] Kaotik determinism testi: sabit salt ile aynı girdi -> aynı katman çıktısı
+3. [x] Kaotik aktif bütünlük testi: ciphertext byte bozma -> decrypt hatası
+4. [x] Salt/nonce tazelik testi: aynı girdi iki şifrelemede metadata farklı
+5. [x] CI kaotik odak adımı: `test_kaotik_`
+6. [x] CI determinism adımı: `test_kaotik_layers_deterministic_with_fixed_salt`
+7. [x] CI platform matrisi: Windows + Linux + macOS
+8. [x] README KDF parametreleri ve nonce/salt politikası netleştirildi
+
+### Kalan maddeler (operasyonel/uzun vadeli)
+
+1. [ ] Bağımsız güvenlik denetimi
+2. [ ] Geniş benchmark raporu (küçük/orta/büyük dosya setleri)
+3. [ ] GUI akışında kaotik modun ana tercih olarak UX sertleştirmesi
+4. [ ] Release otomasyonu ve paketleme dağıtımı

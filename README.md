@@ -150,6 +150,13 @@ Tüm komut örnekleri yukarıdaki **Nasıl çalıştırılır?** bölümünde. P
 
 **Güvenlik:** Parolayı mümkünse `KAOTIK_PASSWORD` ortam değişkeni ile verin; `--password` işlem listesinde görünebilir. Hassas bellek kullanım sonrası sıfırlanır; Kyber sabit-zamanlı karşılaştırma ve rejection sampling kullanır. Bozuk/zararlı dosyaya karşı: AES chunk boyutu en fazla 16 MiB, Kyber KEM ciphertext uzunluğu sınırlıdır. **Bu yazılım bağımsız bir güvenlik denetiminden geçmemiştir;** yüksek risk senaryolarında dikkatli kullanın. Bağımlılıkları (`cargo update`, güvenlik yamaları) güncel tutun.
 
+### KDF ve nonce/salt politikası
+
+1. Yeni dosyalarda varsayılan KDF `Argon2id` kullanılır: `m_cost=65536` (64 MiB), `t_cost=3`.
+2. Eski dosyalar için geri uyumluluk amacıyla `PBKDF2-SHA512` (`500_000` iterasyon) desteklenir.
+3. Her yeni şifrelemede rastgele `salt` ve `nonce` üretilir; aynı parola/girdi ile bile metadata tekrar etmez.
+4. AES streaming modunda her blok için `nonce_for_chunk` ile benzersiz nonce türetilir.
+
 ## Tests
 
 ```bash

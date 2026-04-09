@@ -28,20 +28,20 @@ fn derive_extended_params(
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
-    hasher.update(&layer.to_le_bytes());
+    hasher.update(layer.to_le_bytes());
     hasher.update(salt);
     if let Some(prev) = prev_layer_hash {
         hasher.update(prev);
     }
     let h = hasher.finalize();
     let mut p = [0.0_f64; 12];
-    for i in 0..12 {
+    for (i, slot) in p.iter_mut().enumerate() {
         let j = i * 2;
         let v = u16::from_le_bytes([h[j % 32], h[(j + 1) % 32]]) as f64 / 65535.0;
-        p[i] = v;
+        *slot = v;
     }
     p[0] = 0.1 + p[0] * 0.8;
-    p[1] = 3.5 + p[1];
+    p[1] += 3.5;
     p[2] = 1.4 + p[2] * 0.1;
     p[3] = 0.3 + p[3] * 0.1;
     p[4] = 10.0 + p[4] * 5.0;
@@ -195,13 +195,13 @@ fn chaos_sbox(
     let mut idx_val: Vec<(f64, u8)> = (0..256).map(|i| (0.0_f64, i as u8)).collect();
     let p = derive_extended_params(password, salt, layer, prev_layer_hash);
     let mut x = p[0];
-    for i in 0..256 {
+    for entry in idx_val.iter_mut().take(256) {
         x = 3.9 * x * (1.0 - x);
         x = (x * 1.0 + p[1] * (1.0 - x)) % 1.0;
         if x < 0.0 {
             x += 1.0;
         }
-        idx_val[i].0 = x;
+        entry.0 = x;
     }
     // Sıralama deterministik: aynı f64 değerlerde indeks (a.1) ile ayır. Platformlar arası tutarlı S-box.
     idx_val.sort_by(|a, b| {

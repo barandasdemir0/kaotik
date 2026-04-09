@@ -11,7 +11,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -28,6 +28,9 @@ jobs:
 
       - name: Test (Kaotik focus)
         run: cargo test --release test_kaotik_
+
+      - name: Test (Kaotik determinism)
+        run: cargo test --release test_kaotik_layers_deterministic_with_fixed_salt
 
       - name: Test
         run: cargo test --release
