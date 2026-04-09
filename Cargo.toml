@@ -1,0 +1,31 @@
+[package]
+name = "kaotik"
+version = "0.1.0"
+edition = "2021"
+description = "Kaotik Sifreleme - platform-independent crypto library and CLI"
+license = "MIT"
+
+[lib]
+name = "kaotik"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kaotik"
+path = "src/main.rs"
+
+[features]
+default = []
+wasm = []   # wasm32-unknown-unknown (kaotik/aes only, no Kyber)
+ffi = []    # C FFI (no_mangle extern "C")
+
+[dependencies]
+getrandom = "0.2"
+aes-gcm = "0.10"
+sha2 = "0.10"
+pbkdf2 = "0.12"
+hkdf = "0.12"
+argon2 = "0.5"
+pqcrypto-kyber = "0.8"
+zeroize = "1.7"
+pqcrypto-traits = "0.3.5"
+clap = { version = "4.4", features = ["derive"] }

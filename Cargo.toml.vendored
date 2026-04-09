@@ -1,0 +1,9 @@
+# After running: cargo vendor vendor
+# Copy this to Cargo.toml [dependencies] to use vendored crates (no network at build).
+
+[dependencies]
+getrandom = { path = "vendor/getrandom" }
+aes-gcm = { path = "vendor/aes-gcm" }
+sha2 = { path = "vendor/sha2" }
+pbkdf2 = { path = "vendor/pbkdf2" }
+hkdf = { path = "vendor/hkdf" }
