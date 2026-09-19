@@ -18,12 +18,15 @@ pub fn derive_key_pbkdf2(password: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
     Ok(key)
 }
 
-/// Argon2id ile anahtar türetme. OWASP önerisi: 64 MiB bellek, 3 iterasyon.
+/// Argon2id ile anahtar türetme. OWASP "yüksek güvenlik" seviyesi: 128 MiB bellek, 4 iterasyon,
+/// paralellik 1 (bellek-zaman ödünleşim saldırılarına karşı en dirençli konfigürasyon; çok
+/// çekirdekli paralellik brute-force'u hızlandırabileceği için bilinçli olarak 1 bırakıldı).
 pub fn derive_key_argon2(password: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
     use argon2::{Algorithm, Argon2, ParamsBuilder, Version};
     let params = ParamsBuilder::new()
-        .m_cost(65536) // 64 MiB (OWASP)
-        .t_cost(3)
+        .m_cost(131072) // 128 MiB (OWASP "yüksek güvenlik" önerisi)
+        .t_cost(4)
+        .p_cost(1)
         .build()
         .map_err(|e| Error::Crypto(e.to_string()))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);

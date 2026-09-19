@@ -1,7 +1,8 @@
 //! # Kaotik — platform-bağımsız şifreleme kütüphanesi
 //!
-//! Modlar: **kaotik** (parola + kaotik katman + AES), **aes** (sadece AES-256-GCM, streaming),
-//! **kyber** (NIST ML-KEM Kyber-768 + parola ile korunan anahtar dosyası).
+//! Modlar: **kaotik** (parola + kaotik katman + calculus difüzyon + AES), **aes** (sadece
+//! AES-256-GCM, streaming), **kyber** (NIST ML-KEM Kyber-1024 + X25519 hibrit KEM + parola ile
+//! korunan anahtar dosyası).
 
 pub mod chaotic;
 pub mod crypto;
@@ -19,8 +20,10 @@ pub use format::{
     read_header, read_encrypted_secret_key, read_aes_chunked_start, write_header,
     write_encrypted_secret_key, write_aes_chunked_start,
     write_kyber_payload, read_kyber_payload,
+    write_hybrid_kyber_payload, read_hybrid_kyber_payload,
     FORMAT_AES, FORMAT_KAOTIK, FORMAT_KYBER,
-    VERSION_AES_CHUNKED, VERSION_CURRENT, VERSION_KAOTIK_PADDED, VERSION_LEGACY,
+    VERSION_AES_CHUNKED, VERSION_CURRENT, VERSION_KAOTIK_PADDED, VERSION_KAOTIK_CALC,
+    VERSION_HYBRID_KEM, VERSION_LEGACY,
 };
 
 use std::io::{Read, Write};
@@ -105,9 +108,10 @@ pub fn encrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password:
     }
     let mut padded = apply_random_padding(&plaintext)?;
     chaotic::apply_chaotic_xor_layers(&mut padded, password, &salt)?;
+    chaotic::apply_calculus_diffusion(&mut padded, password, &salt)?;
     let ciphertext_with_tag = crypto::aes_gcm_encrypt(&key, &nonce, &padded)?;
     crypto::secure_zero(plaintext.as_mut_slice());
-    format::write_header(&mut writer, format::VERSION_KAOTIK_PADDED, format::FORMAT_KAOTIK)?;
+    format::write_header(&mut writer, format::VERSION_KAOTIK_CALC, format::FORMAT_KAOTIK)?;
     format::write_kaotik_payload(&mut writer, &salt, kdf, &nonce, &ciphertext_with_tag)?;
     crypto::secure_zero(&mut key);
     Ok(())
@@ -128,6 +132,9 @@ pub fn decrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password:
         }
         let mut key = crypto::derive_key(password, &salt, kdf)?;
         let mut padded_plain = Zeroizing::new(crypto::aes_gcm_decrypt(&key, &nonce, &ciphertext_with_tag)?);
+        if version >= format::VERSION_KAOTIK_CALC {
+            chaotic::reverse_calculus_diffusion(&mut padded_plain, password, &salt)?;
+        }
         chaotic::reverse_chaotic_xor_layers(&mut padded_plain, password, &salt)?;
         let mut final_plain = if version >= format::VERSION_KAOTIK_PADDED {
             Zeroizing::new(remove_random_padding(&padded_plain)?)
@@ -144,7 +151,10 @@ pub fn decrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password:
     result
 }
 
-/// Kyber mod: NIST ML-KEM Kyber-768. Paylaşılan gizlilik AES anahtarı olur; gizli anahtar `secret_key_out`'a parola ile şifrelenmiş yazılır.
+/// Kyber mod: hibrit NIST ML-KEM Kyber-1024 (post-kuantum) + X25519 (klasik ECDH). Nihai AES
+/// anahtarı iki bağımsız zorluk varsayımının HKDF ile birleşiminden gelir (bkz. `nist_kyber`
+/// modülü): kafes problemi VEYA eliptik eğri ayrık logaritma problemi tek başına kırılsa bile
+/// anahtar güvende kalır. Her iki gizli anahtar da `secret_key_out`'a parola ile şifrelenmiş yazılır.
 pub fn encrypt_kyber<R: Read, W: Write>(
     mut reader: R,
     mut writer: W,
@@ -152,31 +162,29 @@ pub fn encrypt_kyber<R: Read, W: Write>(
     secret_key_out: &mut dyn Write,
 ) -> Result<()> {
     validate_password(password)?;
-    let mut kp = nist_kyber::generate_keypair()?;
-    let (mut ss, kem_ct) = nist_kyber::encapsulate(&kp.public_key)?;
-    if ss.len() < 32 {
-        crypto::secure_zero(ss.as_mut_slice());
-        return Err(Error::Crypto("Kyber shared secret too short".into()));
-    }
-    let mut aes_key: [u8; 32] = ss[..32]
-        .try_into()
-        .map_err(|_| Error::Crypto("Kyber shared secret too short".into()))?;
+    let kp = nist_kyber::generate_hybrid_keypair()?;
+    let (mut aes_key, kem_ct, x25519_epk) =
+        nist_kyber::hybrid_encapsulate(&kp.kyber_public, &kp.x25519_public)?;
     let nonce = crypto::gen_nonce()?;
     let mut plaintext = Zeroizing::new(Vec::new());
     reader.read_to_end(&mut plaintext)?;
     let ciphertext_with_tag = crypto::aes_gcm_encrypt(&aes_key, &nonce, &plaintext)?;
     crypto::secure_zero(plaintext.as_mut_slice());
-    format::write_header(&mut writer, format::VERSION_LEGACY, format::FORMAT_KYBER)?;
-    format::write_kyber_payload(&mut writer, &kem_ct, &nonce, &ciphertext_with_tag)?;
+    format::write_header(&mut writer, format::VERSION_HYBRID_KEM, format::FORMAT_KYBER)?;
+    format::write_hybrid_kyber_payload(&mut writer, &kem_ct, &x25519_epk, &nonce, &ciphertext_with_tag)?;
+
     let key_salt = crypto::gen_salt()?;
     let key_nonce = crypto::gen_nonce()?;
     let kdf = crypto::KDF_ARGON2;
     let mut key_file_key = crypto::derive_key(password, &key_salt, kdf)?;
-    let encrypted_sk = crypto::aes_gcm_encrypt(&key_file_key, &key_nonce, &kp.secret_key)?;
-    format::write_encrypted_secret_key(secret_key_out, 3, &key_salt, kdf, &key_nonce, &encrypted_sk)?;
-    crypto::secure_zero(ss.as_mut_slice());
+    // Anahtar dosyası: kyber_secret || x25519_secret (32 bayt) tek blok olarak birlikte şifrelenir.
+    let mut combined_sk = kp.kyber_secret.clone();
+    combined_sk.extend_from_slice(&kp.x25519_secret);
+    let encrypted_sk = crypto::aes_gcm_encrypt(&key_file_key, &key_nonce, &combined_sk)?;
+    crypto::secure_zero(combined_sk.as_mut_slice());
+    format::write_encrypted_secret_key(secret_key_out, 4, &key_salt, kdf, &key_nonce, &encrypted_sk)?;
+
     crypto::secure_zero(&mut aes_key);
-    crypto::secure_zero(kp.secret_key.as_mut_slice());
     crypto::secure_zero(&mut key_file_key);
     Ok(())
 }
@@ -262,7 +270,9 @@ pub fn decrypt_aes<R: Read, W: Write>(mut reader: R, mut writer: W, password: &s
     result
 }
 
-/// Kyber mod dosyasını çözer. Gizli anahtar `key_file_reader`'dan parola ile açılır; KEM decapsulate sonrası AES ile çözülür.
+/// Kyber mod dosyasını çözer. Gizli anahtarlar (Kyber-1024 + X25519) `key_file_reader`'dan parola
+/// ile açılır; hibrit decapsulate sonrası AES ile çözülür. Eski (Kyber-768, non-hibrit) dosyalar
+/// bu sürümde desteklenmez — bkz. sürüm notları.
 pub fn decrypt_kyber<R: Read, W: Write>(
     mut reader: R,
     mut writer: W,
@@ -272,29 +282,40 @@ pub fn decrypt_kyber<R: Read, W: Write>(
     let start = Instant::now();
     let result = (|| {
         validate_password(password)?;
-        let (_key_ver, key_salt, key_kdf, key_nonce, encrypted_sk) = format::read_encrypted_secret_key(key_file_reader)?;
+        let (key_ver, key_salt, key_kdf, key_nonce, encrypted_sk) = format::read_encrypted_secret_key(key_file_reader)?;
+        if key_ver != 4 {
+            return Err(Error::Format(
+                "Old Kyber key file format (pre-hybrid) is not supported by this version".into(),
+            ));
+        }
         let mut key_file_key = crypto::derive_key(password, &key_salt, key_kdf)?;
         let mut sk_bytes = Zeroizing::new(crypto::aes_gcm_decrypt(&key_file_key, &key_nonce, &encrypted_sk)?);
         crypto::secure_zero(&mut key_file_key);
-        let (_version, format_byte) = format::read_header(&mut reader)?;
-        if format_byte != format::FORMAT_KYBER {
+        if sk_bytes.len() < 32 {
             crypto::secure_zero(sk_bytes.as_mut_slice());
-            return Err(Error::Format("Not a Kyber format file".into()));
-        }
-        let (kem_ct, nonce, ciphertext_with_tag) = format::read_kyber_payload(&mut reader)?;
-        let mut ss = Zeroizing::new(nist_kyber::decapsulate(&kem_ct, &sk_bytes)?);
-        crypto::secure_zero(sk_bytes.as_mut_slice());
-        if ss.len() < 32 {
-            crypto::secure_zero(ss.as_mut_slice());
             return Err(Error::Crypto("Decryption failed".into()));
         }
-        let mut aes_key: [u8; 32] = ss[..32]
-            .try_into()
-            .map_err(|_| Error::Crypto("Decryption failed".into()))?;
+        let split = sk_bytes.len() - 32;
+        let mut kyber_secret = sk_bytes[..split].to_vec();
+        let mut x25519_secret = [0u8; 32];
+        x25519_secret.copy_from_slice(&sk_bytes[split..]);
+
+        let (version, format_byte) = format::read_header(&mut reader)?;
+        if format_byte != format::FORMAT_KYBER || version < format::VERSION_HYBRID_KEM {
+            crypto::secure_zero(sk_bytes.as_mut_slice());
+            crypto::secure_zero(kyber_secret.as_mut_slice());
+            crypto::secure_zero(&mut x25519_secret);
+            return Err(Error::Format("Not a hybrid Kyber format file".into()));
+        }
+        let (kem_ct, x25519_epk, nonce, ciphertext_with_tag) = format::read_hybrid_kyber_payload(&mut reader)?;
+        let mut aes_key = nist_kyber::hybrid_decapsulate(&kem_ct, &kyber_secret, &x25519_secret, &x25519_epk)?;
+        crypto::secure_zero(sk_bytes.as_mut_slice());
+        crypto::secure_zero(kyber_secret.as_mut_slice());
+        crypto::secure_zero(&mut x25519_secret);
+
         let mut plaintext = Zeroizing::new(crypto::aes_gcm_decrypt(&aes_key, &nonce, &ciphertext_with_tag)?);
         writer.write_all(&plaintext)?;
         crypto::secure_zero(plaintext.as_mut_slice());
-        crypto::secure_zero(ss.as_mut_slice());
         crypto::secure_zero(&mut aes_key);
         Ok(())
     })();
@@ -484,6 +505,17 @@ mod tests {
     }
 
     #[test]
+    fn test_calculus_diffusion_reversible() {
+        let salt = [3u8; SALT_LEN];
+        let original = b"calculus layer round trip check, arbitrary length!".to_vec();
+        let mut data = original.clone();
+        chaotic::apply_calculus_diffusion(&mut data, TEST_PASSWORD, &salt).unwrap();
+        assert_ne!(data, original);
+        chaotic::reverse_calculus_diffusion(&mut data, TEST_PASSWORD, &salt).unwrap();
+        assert_eq!(data, original);
+    }
+
+    #[test]
     fn test_corrupted_file_fails() {
         let mut dec = Vec::new();
         let bad: &[u8] = b"NOT_KAOS\x00\x00\x00";
@@ -528,7 +560,7 @@ mod tests {
         let mut cur = Cursor::new(&cipher);
         let (version, fmt) = read_header(&mut cur).unwrap();
         assert_eq!(fmt, FORMAT_KAOTIK);
-        assert_eq!(version, format::VERSION_KAOTIK_PADDED);
+        assert_eq!(version, format::VERSION_KAOTIK_CALC);
     }
 
     #[test]

@@ -30,3 +30,5 @@ zeroize = "1.7"
 pqcrypto-traits = "0.3.5"
 clap = { version = "4.4", features = ["derive"] }
 subtle = "2.6"
+x25519-dalek = { version = "2.0", features = ["static_secrets", "zeroize"] }
+rand_core = "0.6"
