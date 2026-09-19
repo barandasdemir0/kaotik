@@ -1,6 +1,6 @@
 # Kaotik — Rust crypto library and CLI
 
-Platform-independent encryption. **Kyber:** NIST FIPS 203 ML-KEM (Kyber-768), kuantum direnci. **Kaotik modu:** 8 katman hibrit kaotik + permütasyon + S-box + AES-256-GCM. **AES modu:** yalnizca AES-256-GCM (NIST standart), yani kaotik katman bu modda bilincli olarak kapali. Paroladan anahtar: **Argon2id** (yeni dosyalar) veya PBKDF2 (eski dosyalar, geri uyumlu). Windows, Linux, macOS.
+Platform-independent encryption. **Kyber:** NIST FIPS 203 ML-KEM (Kyber-1024, en yüksek NIST seviyesi) + X25519 **hibrit** KEM — kuantum direncine ek olarak klasik ECDH ile ikinci bağımsız güvenlik katmanı (biri kırılsa da diğeri anahtarı korur). **Kaotik modu:** 8 katman hibrit kaotik + permütasyon + S-box + ayrık türev/integral (calculus) difüzyon katmanı + AES-256-GCM. **AES modu:** yalnizca AES-256-GCM (NIST standart), yani kaotik katman bu modda bilincli olarak kapali. Paroladan anahtar: **Argon2id** (128 MiB, 4 iterasyon — OWASP yüksek güvenlik seviyesi; yeni dosyalar) veya PBKDF2 (eski dosyalar, geri uyumlu). Windows, Linux, macOS.
 
 Kisa ozet: Kaotiklik bu projede vardir ve ana moddur; sadece `--mode aes` secilirse kaotik katman kullanilmaz.
 
@@ -31,7 +31,7 @@ Program **komut satırı (CLI)** çalışır: `kaotik <komut> <seçenekler>`.
 
 1. **kaotik** — Parola + 8 katman kaotik (XOR, permütasyon, S-box) + AES-256-GCM. Tek parola yeter; büyük dosyalar için bellekte tutulur (max 256 MiB).
 2. **aes** — Sadece parola + AES-256-GCM, 64 KiB bloklarla (streaming). Büyük dosyalar için uygun.
-3. **kyber** — NIST Kyber-768 (kuantum direnci). Şifrelerken bir **anahtar dosyası** (örn. `secret.key`) oluşturulur; bu dosya parola ile korunur. Çözerken hem parola hem bu anahtar dosyası gerekir.
+3. **kyber** — Hibrit NIST Kyber-1024 + X25519 (kuantum direnci + klasik ECDH). Şifrelerken bir **anahtar dosyası** (örn. `secret.key`) oluşturulur; bu dosya parola ile korunur. Çözerken hem parola hem bu anahtar dosyası gerekir. **Not:** bu sürümle eski (Kyber-768, non-hibrit) `--mode kyber` dosyaları artık desteklenmez; kaotik ve aes modlar geri uyumludur.
 
 Parola: En az 16 karakter, büyük harf + rakam + özel karakter. İstersen `KAOTIK_PASSWORD` ortam değişkeni ile verebilirsin (komut satırında görünmez).
 
@@ -152,7 +152,7 @@ Tüm komut örnekleri yukarıdaki **Nasıl çalıştırılır?** bölümünde. P
 
 ### KDF ve nonce/salt politikası
 
-1. Yeni dosyalarda varsayılan KDF `Argon2id` kullanılır: `m_cost=65536` (64 MiB), `t_cost=3`.
+1. Yeni dosyalarda varsayılan KDF `Argon2id` kullanılır: `m_cost=131072` (128 MiB), `t_cost=4`, `p_cost=1` (OWASP yüksek güvenlik seviyesi).
 2. Eski dosyalar için geri uyumluluk amacıyla `PBKDF2-SHA512` (`500_000` iterasyon) desteklenir.
 3. Her yeni şifrelemede rastgele `salt` ve `nonce` üretilir; aynı parola/girdi ile bile metadata tekrar etmez.
 4. AES streaming modunda her blok için `nonce_for_chunk` ile benzersiz nonce türetilir.

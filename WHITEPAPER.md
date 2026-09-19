@@ -47,15 +47,24 @@ Not: Kaotik katman tek başına güvenlik varsayımı değildir. Asıl bütünl�
 2. Chunk tabanlı stream işleme
 3. Büyük dosyalar için performans odaklı kullanım
 
-### 3.3 Kyber Modu
+### 3.3 Kyber Modu (Hibrit)
 
-1. ML-KEM (Kyber-768) ile paylaşılan sır üretimi
-2. Dosya içeriği AES-256-GCM ile şifrelenir
-3. Gizli anahtar dosyası parola ile korunur
+1. ML-KEM (Kyber-1024, NIST en yüksek güvenlik seviyesi) + X25519 (klasik ECDH) ile bağımsız iki paylaşılan sır üretilir
+2. İki sır HKDF-SHA256 ile birleştirilir (`kaotik-hybrid-kem-v1`); kafes problemi VEYA eliptik eğri ayrık logaritma problemi tek başına kırılsa bile anahtar güvende kalır (IETF hibrit-KEM taslaklarındaki birleştirici ilkesiyle aynı)
+3. Dosya içeriği elde edilen AES-256 anahtarıyla AES-256-GCM ile şifrelenir
+4. Her iki gizli anahtar (Kyber + X25519) da tek dosyada parola ile korunur
+
+### 3.4 Calculus Difüzyon Katmanı (Kaotik Mod)
+
+8 katmanlı kaotik zincirin üzerine, ayrık türev/integral (finite difference) tabanlı ek bir
+difüzyon katmanı eklenmiştir: `Δf[i] = f[i] - f[i-1]` (ileri fark = ayrık türev), anahtar
+akışıyla birlikte uygulanır ve kümülatif toplamla (ayrık integral) tersinir şekilde geri alınır.
+Bu katman kaotik zincirin **yerine geçmez**, üstüne eklenir; asıl bütünlük/doğrulama temeli
+yine AEAD (AES-256-GCM) katmanıdır.
 
 ## 4. KDF Politikası
 
-1. Yeni dosyalar: Argon2id (m_cost=65536, t_cost=3)
+1. Yeni dosyalar: Argon2id (m_cost=131072 / 128 MiB, t_cost=4, p_cost=1 — OWASP yüksek güvenlik seviyesi)
 2. Eski dosyalar: PBKDF2-SHA512 (500000 iterasyon)
 3. Geri uyumluluk dosya formatındaki KDF alanı ile sağlanır
 

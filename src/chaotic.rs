@@ -331,6 +331,52 @@ pub fn apply_chaotic_xor_layers(data: &mut [u8], password: &str, salt: &[u8]) ->
     Ok(())
 }
 
+/// Ayrık türev/integral (calculus) difüzyon katmanı — 8 katmanlı kaotik zincirin **üstüne**
+/// eklenen ek bir savunma katmanı (kaotik katmanın yerine geçmez, kaldırılmaz).
+///
+/// Matematiksel arka plan: bir baytlar dizisi `f[0..n)` ayrık bir fonksiyon olarak düşünülürse,
+/// "ileri fark" operatörü `Δf[i] = f[i] - f[i-1]` bu fonksiyonun ayrık türevidir (Taylor/Maclaurin
+/// serilerindeki türev teriminin sonlu-fark analoğu). Bu adım her terime önce parola+salt'tan
+/// türetilmiş bir anahtar akışı ekler (mod 256, bir polinomun değişken katsayısı gibi), sonra
+/// ayrık türevini alır. Zincirleme (her çıktı bir öncekine bağlı) tüm baytlar arasında ek bir
+/// difüzyon/avalanche etkisi sağlar. Tersi, ayrık integral (kümülatif toplam — Riemann
+/// toplamının ayrık biçimi) ile alınır ve matematiksel olarak tam tersinirdir (bkz. testler).
+fn calculus_keystream(password: &str, salt: &[u8], length: usize) -> Result<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(password.as_bytes());
+    h.update(salt);
+    h.update(b"kaotik-calculus-prk");
+    let prk = h.finalize();
+    crypto::hkdf_expand(&prk, b"kaotik-calculus-v1", length, Some(salt))
+}
+
+pub fn apply_calculus_diffusion(data: &mut [u8], password: &str, salt: &[u8]) -> Result<()> {
+    let mut ks = calculus_keystream(password, salt, data.len() + 1)?;
+    let seed = ks[0];
+    let mut prev = seed;
+    for (i, byte) in data.iter_mut().enumerate() {
+        let keyed = byte.wrapping_add(ks[i + 1]);
+        *byte = keyed.wrapping_sub(prev);
+        prev = keyed;
+    }
+    crypto::secure_zero(&mut ks);
+    Ok(())
+}
+
+pub fn reverse_calculus_diffusion(data: &mut [u8], password: &str, salt: &[u8]) -> Result<()> {
+    let mut ks = calculus_keystream(password, salt, data.len() + 1)?;
+    let seed = ks[0];
+    let mut prev = seed;
+    for (i, byte) in data.iter_mut().enumerate() {
+        let keyed = byte.wrapping_add(prev);
+        *byte = keyed.wrapping_sub(ks[i + 1]);
+        prev = keyed;
+    }
+    crypto::secure_zero(&mut ks);
+    Ok(())
+}
+
 pub fn reverse_chaotic_xor_layers(data: &mut [u8], password: &str, salt: &[u8]) -> Result<()> {
     let hashes = layer_hashes(password, salt, data.len());
     for layer in (1..=LAYERS).rev() {

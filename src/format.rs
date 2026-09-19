@@ -13,6 +13,10 @@ pub const VERSION_CURRENT: u16 = 3;
 pub const VERSION_AES_CHUNKED: u16 = 4;
 /// Kaotik payload + rastgele dolgu (boyut gizleme).
 pub const VERSION_KAOTIK_PADDED: u16 = 5;
+/// Kaotik payload + ayrık türev/integral (calculus) difüzyon katmanı (bkz. `chaotic` modülü).
+pub const VERSION_KAOTIK_CALC: u16 = 6;
+/// Kyber payload: Kyber-1024 + X25519 hibrit KEM (ephemeral X25519 public anahtarı payload'da).
+pub const VERSION_HYBRID_KEM: u16 = 7;
 
 pub const FORMAT_KAOTIK: u8 = 0x01;
 pub const FORMAT_KYBER: u8 = 0x02;
@@ -20,6 +24,7 @@ pub const FORMAT_AES: u8 = 0x03;
 
 pub type KaotikPayload = ([u8; SALT_LEN], u8, [u8; NONCE_LEN], Vec<u8>);
 pub type EncryptedSecretKeyPayload = (u8, [u8; SALT_LEN], u8, [u8; NONCE_LEN], Vec<u8>);
+pub type HybridKyberPayload = (Vec<u8>, [u8; 32], [u8; NONCE_LEN], Vec<u8>);
 
 pub fn write_header<W: Write>(w: &mut W, version: u16, format_byte: u8) -> Result<()> {
     w.write_all(MAGIC)?;
@@ -79,7 +84,7 @@ pub fn read_kaotik_payload<R: Read>(
     Ok((salt, kdf, nonce, ciphertext))
 }
 
-// NIST Kyber-768: ct (değişken) + nonce (12) + aes_gcm_ciphertext
+// NIST Kyber-1024 (eski, non-hibrit format — sadece geriye dönük okuma amaçlı kod yolu): ct (değişken) + nonce (12) + aes_gcm_ciphertext
 pub fn write_kyber_payload<W: Write>(
     w: &mut W,
     kem_ct: &[u8],
@@ -93,7 +98,7 @@ pub fn write_kyber_payload<W: Write>(
     Ok(())
 }
 
-/// Kyber-768 KEM ciphertext sabit 1088 byte; üst sınır sahtecilik/DoS önlemi.
+/// Kyber-1024 KEM ciphertext sabit 1568 byte; üst sınır sahtecilik/DoS önlemi.
 const MAX_KEM_CT_LEN: usize = 2048;
 
 pub fn read_kyber_payload<R: Read>(
@@ -112,6 +117,42 @@ pub fn read_kyber_payload<R: Read>(
     let mut ciphertext = Vec::new();
     r.read_to_end(&mut ciphertext)?;
     Ok((kem_ct, nonce, ciphertext))
+}
+
+// Hibrit (Kyber-1024 + X25519) payload: ct(4+değişken) + x25519_ephemeral_pk(32) + nonce(12) + aes_ct
+pub fn write_hybrid_kyber_payload<W: Write>(
+    w: &mut W,
+    kem_ct: &[u8],
+    x25519_ephemeral_pk: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    ciphertext_with_tag: &[u8],
+) -> Result<()> {
+    w.write_all(&(kem_ct.len() as u32).to_le_bytes())?;
+    w.write_all(kem_ct)?;
+    w.write_all(x25519_ephemeral_pk)?;
+    w.write_all(nonce)?;
+    w.write_all(ciphertext_with_tag)?;
+    Ok(())
+}
+
+pub fn read_hybrid_kyber_payload<R: Read>(
+    r: &mut R,
+) -> Result<HybridKyberPayload> {
+    let mut ct_len_buf = [0u8; 4];
+    r.read_exact(&mut ct_len_buf)?;
+    let ct_len = u32::from_le_bytes(ct_len_buf) as usize;
+    if ct_len > MAX_KEM_CT_LEN {
+        return Err(Error::Format("Invalid Kyber ciphertext length".into()));
+    }
+    let mut kem_ct = vec![0u8; ct_len];
+    r.read_exact(&mut kem_ct)?;
+    let mut x25519_epk = [0u8; 32];
+    r.read_exact(&mut x25519_epk)?;
+    let mut nonce = [0u8; NONCE_LEN];
+    r.read_exact(&mut nonce)?;
+    let mut ciphertext = Vec::new();
+    r.read_to_end(&mut ciphertext)?;
+    Ok((kem_ct, x25519_epk, nonce, ciphertext))
 }
 
 /// AES chunked: salt(32) + kdf(1) + base_nonce(12); sonra her blok için len(4 LE) + ciphertext.
@@ -139,7 +180,8 @@ pub fn read_aes_chunked_start<R: Read>(
     Ok((salt, kdf[0], base_nonce))
 }
 
-/// Gizli anahtar dosyası. v2: salt(32)+nonce(12)+ct. v3: version(1)=3 + salt(32)+kdf(1)+nonce(12)+ct.
+/// Gizli anahtar dosyası. v2: salt(32)+nonce(12)+ct. v3+: version(1) + salt(32)+kdf(1)+nonce(12)+ct
+/// (v3 = Kyber-768/1024 tek anahtar, v4 = hibrit Kyber+X25519 birleşik anahtar bloğu).
 pub fn write_encrypted_secret_key<W: Write + ?Sized>(
     w: &mut W,
     version: u8,
@@ -149,7 +191,7 @@ pub fn write_encrypted_secret_key<W: Write + ?Sized>(
     encrypted_sk: &[u8],
 ) -> Result<()> {
     if version >= 3 {
-        w.write_all(&[3u8])?;
+        w.write_all(&[version])?;
         w.write_all(salt)?;
         w.write_all(&[kdf])?;
         w.write_all(nonce)?;
@@ -161,14 +203,14 @@ pub fn write_encrypted_secret_key<W: Write + ?Sized>(
     Ok(())
 }
 
-/// version_byte: 3 = yeni (salt,kdf,nonce,ct), değilse eski (ilk okunan byte tuzun parçası: salt 31 okumak gerekir).
+/// version_byte >= 3: (salt,kdf,nonce,ct); değilse eski (ilk okunan byte tuzun parçası).
 pub fn read_encrypted_secret_key<R: Read + ?Sized>(
     r: &mut R,
 ) -> Result<EncryptedSecretKeyPayload> {
     let mut first = [0u8; 1];
     r.read_exact(&mut first)?;
     let version = first[0];
-    if version == 3 {
+    if version >= 3 {
         let mut salt = [0u8; SALT_LEN];
         r.read_exact(&mut salt)?;
         let mut kdf = [0u8; 1];
@@ -177,7 +219,7 @@ pub fn read_encrypted_secret_key<R: Read + ?Sized>(
         r.read_exact(&mut nonce)?;
         let mut encrypted = Vec::new();
         r.read_to_end(&mut encrypted)?;
-        return Ok((3, salt, kdf[0], nonce, encrypted));
+        return Ok((version, salt, kdf[0], nonce, encrypted));
     }
     // Eski format: first byte tuzun ilk byte'ı; 31 tuz, 12 nonce, kalan ct
     let mut salt = [0u8; SALT_LEN];
