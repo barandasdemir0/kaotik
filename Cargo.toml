@@ -6,6 +6,7 @@ description = "Kaotik Sifreleme - platform-independent crypto library and CLI"
 license = "MIT"
 
 [lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
 name = "kaotik"
 path = "src/lib.rs"
 
@@ -26,7 +27,12 @@ pbkdf2 = "0.12"
 hkdf = "0.12"
 argon2 = "0.5"
 pqcrypto-kyber = "0.8"
-zeroize = "1.7"
+zeroize = { version = "1.7", features = ["derive"] }
 pqcrypto-traits = "0.3.5"
 clap = { version = "4.4", features = ["derive"] }
 subtle = "2.6"
+ml-kem = { version = "0.3.2", features = ["getrandom"] }
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc"] }
+x25519-dalek = "3.0.0"
+ed25519-dalek = { version = "3.0.0", features = ["zeroize"] }
+chacha20poly1305 = "0.11.0"

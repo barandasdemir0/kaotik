@@ -7,6 +7,8 @@ pub mod chaotic;
 pub mod crypto;
 pub mod error;
 pub mod format;
+pub mod hybrid;
+pub mod passhash;
 pub mod nist_kyber;
 pub mod password;
 
