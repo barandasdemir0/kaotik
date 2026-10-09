@@ -89,6 +89,24 @@ int32_t kaotik_session_import(const uint8_t *storage_key, size_t key_len, const 
                               KaotikSession **session_out);
 void    kaotik_session_free(KaotikSession *s);
 
+/* Group chat (Sender Keys + hybrid signatures). Send the distribution blob to each member
+ * over a pairwise ratchet session; re-create the sender after a member leaves. */
+typedef struct KaotikGroupSender KaotikGroupSender;
+typedef struct KaotikGroupReceiver KaotikGroupReceiver;
+int32_t kaotik_group_sender_new(const uint8_t *group_id, size_t group_id_len, KaotikGroupSender **sender_out);
+int32_t kaotik_group_sender_distribution(const KaotikGroupSender *s, KaotikBuf *out);
+int32_t kaotik_group_encrypt(KaotikGroupSender *s, const uint8_t *msg, size_t msg_len, KaotikBuf *out);
+int32_t kaotik_group_sender_export(const KaotikGroupSender *s, const uint8_t *storage_key, size_t key_len, KaotikBuf *out);
+int32_t kaotik_group_sender_import(const uint8_t *storage_key, size_t key_len, const uint8_t *blob, size_t blob_len,
+                                   KaotikGroupSender **sender_out);
+void    kaotik_group_sender_free(KaotikGroupSender *s);
+int32_t kaotik_group_receiver_new(const uint8_t *distribution, size_t distribution_len, KaotikGroupReceiver **receiver_out);
+int32_t kaotik_group_decrypt(KaotikGroupReceiver *r, const uint8_t *msg, size_t msg_len, KaotikBuf *out);
+int32_t kaotik_group_receiver_export(const KaotikGroupReceiver *r, const uint8_t *storage_key, size_t key_len, KaotikBuf *out);
+int32_t kaotik_group_receiver_import(const uint8_t *storage_key, size_t key_len, const uint8_t *blob, size_t blob_len,
+                                     KaotikGroupReceiver **receiver_out);
+void    kaotik_group_receiver_free(KaotikGroupReceiver *r);
+
 #ifdef __cplusplus
 }
 #endif

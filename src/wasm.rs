@@ -149,3 +149,53 @@ impl RatchetSession {
         Ok(Self { inner, handshake: Vec::new() })
     }
 }
+
+/// Grup gönderici (Sender Keys).
+#[wasm_bindgen]
+pub struct GroupSender(crate::group::GroupSender);
+
+#[wasm_bindgen]
+impl GroupSender {
+    #[wasm_bindgen(constructor)]
+    pub fn new(group_id: &[u8]) -> Result<GroupSender, JsError> {
+        Ok(Self(crate::group::GroupSender::new(group_id).map_err(js)?))
+    }
+    /// Gizli: her üyeye birebir `RatchetSession` ile şifreleyip gönderin.
+    pub fn distribution(&self) -> Vec<u8> {
+        self.0.distribution().to_vec()
+    }
+    pub fn encrypt(&mut self, msg: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.0.encrypt(msg).map_err(js)
+    }
+    #[wasm_bindgen(js_name = export)]
+    pub fn export_state(&self, storage_key: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.0.export(&key32(storage_key)?).map_err(js)
+    }
+    #[wasm_bindgen(js_name = import)]
+    pub fn import_state(storage_key: &[u8], blob: &[u8]) -> Result<GroupSender, JsError> {
+        Ok(Self(crate::group::GroupSender::import(&key32(storage_key)?, blob).map_err(js)?))
+    }
+}
+
+/// Bir grup üyesinin mesajlarını çözen alıcı.
+#[wasm_bindgen]
+pub struct GroupReceiver(crate::group::GroupReceiver);
+
+#[wasm_bindgen]
+impl GroupReceiver {
+    #[wasm_bindgen(constructor)]
+    pub fn new(distribution: &[u8]) -> Result<GroupReceiver, JsError> {
+        Ok(Self(crate::group::GroupReceiver::from_distribution(distribution).map_err(js)?))
+    }
+    pub fn decrypt(&mut self, msg: &[u8]) -> Result<Vec<u8>, JsError> {
+        Ok(self.0.decrypt(msg).map_err(js)?.to_vec())
+    }
+    #[wasm_bindgen(js_name = export)]
+    pub fn export_state(&self, storage_key: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.0.export(&key32(storage_key)?).map_err(js)
+    }
+    #[wasm_bindgen(js_name = import)]
+    pub fn import_state(storage_key: &[u8], blob: &[u8]) -> Result<GroupReceiver, JsError> {
+        Ok(Self(crate::group::GroupReceiver::import(&key32(storage_key)?, blob).map_err(js)?))
+    }
+}

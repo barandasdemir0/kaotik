@@ -574,6 +574,168 @@ pub unsafe extern "C" fn kaotik_session_free(session: *mut KaotikSession) {
     }
 }
 
+// --- Grup sohbeti (Sender Keys) ---------------------------------------------------
+
+pub struct KaotikGroupSender(crate::group::GroupSender);
+pub struct KaotikGroupReceiver(crate::group::GroupReceiver);
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_group_sender_new(
+    group_id: *const u8, group_id_len: usize,
+    sender_out: *mut *mut KaotikGroupSender,
+) -> i32 {
+    guard(|| {
+        if sender_out.is_null() {
+            return KAOTIK_ERR_ARG;
+        }
+        *sender_out = ptr::null_mut();
+        let g = crypto!(crate::group::GroupSender::new(arg!(input(group_id, group_id_len))));
+        *sender_out = Box::into_raw(Box::new(KaotikGroupSender(g)));
+        KAOTIK_OK
+    })
+}
+
+/// Gizli dağıtım mesajı — her üyeye birebir ratchet oturumuyla şifreleyerek gönderin.
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_group_sender_distribution(sender: *const KaotikGroupSender, out: *mut KaotikBuf) -> i32 {
+    guard(|| {
+        if sender.is_null() || !reset(out) {
+            return KAOTIK_ERR_ARG;
+        }
+        emit(out, (*sender).0.distribution().to_vec());
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_group_encrypt(
+    sender: *mut KaotikGroupSender,
+    msg: *const u8, msg_len: usize,
+    out: *mut KaotikBuf,
+) -> i32 {
+    guard(|| {
+        if sender.is_null() || !reset(out) {
+            return KAOTIK_ERR_ARG;
+        }
+        emit(out, crypto!((*sender).0.encrypt(arg!(input(msg, msg_len)))));
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_group_sender_export(
+    sender: *const KaotikGroupSender,
+    storage_key: *const u8, key_len: usize,
+    out: *mut KaotikBuf,
+) -> i32 {
+    guard(|| {
+        if sender.is_null() || !reset(out) {
+            return KAOTIK_ERR_ARG;
+        }
+        let k = arg!(key32(storage_key, key_len));
+        emit(out, crypto!((*sender).0.export(&k)));
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_group_sender_import(
+    storage_key: *const u8, key_len: usize,
+    blob: *const u8, blob_len: usize,
+    sender_out: *mut *mut KaotikGroupSender,
+) -> i32 {
+    guard(|| {
+        if sender_out.is_null() {
+            return KAOTIK_ERR_ARG;
+        }
+        *sender_out = ptr::null_mut();
+        let k = arg!(key32(storage_key, key_len));
+        let g = crypto!(crate::group::GroupSender::import(&k, arg!(input(blob, blob_len))));
+        *sender_out = Box::into_raw(Box::new(KaotikGroupSender(g)));
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_group_sender_free(sender: *mut KaotikGroupSender) {
+    if !sender.is_null() {
+        drop(Box::from_raw(sender));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_group_receiver_new(
+    distribution: *const u8, distribution_len: usize,
+    receiver_out: *mut *mut KaotikGroupReceiver,
+) -> i32 {
+    guard(|| {
+        if receiver_out.is_null() {
+            return KAOTIK_ERR_ARG;
+        }
+        *receiver_out = ptr::null_mut();
+        let r = crypto!(crate::group::GroupReceiver::from_distribution(arg!(input(distribution, distribution_len))));
+        *receiver_out = Box::into_raw(Box::new(KaotikGroupReceiver(r)));
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_group_decrypt(
+    receiver: *mut KaotikGroupReceiver,
+    msg: *const u8, msg_len: usize,
+    out: *mut KaotikBuf,
+) -> i32 {
+    guard(|| {
+        if receiver.is_null() || !reset(out) {
+            return KAOTIK_ERR_ARG;
+        }
+        let pt = crypto!((*receiver).0.decrypt(arg!(input(msg, msg_len))));
+        emit(out, pt.to_vec());
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_group_receiver_export(
+    receiver: *const KaotikGroupReceiver,
+    storage_key: *const u8, key_len: usize,
+    out: *mut KaotikBuf,
+) -> i32 {
+    guard(|| {
+        if receiver.is_null() || !reset(out) {
+            return KAOTIK_ERR_ARG;
+        }
+        let k = arg!(key32(storage_key, key_len));
+        emit(out, crypto!((*receiver).0.export(&k)));
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_group_receiver_import(
+    storage_key: *const u8, key_len: usize,
+    blob: *const u8, blob_len: usize,
+    receiver_out: *mut *mut KaotikGroupReceiver,
+) -> i32 {
+    guard(|| {
+        if receiver_out.is_null() {
+            return KAOTIK_ERR_ARG;
+        }
+        *receiver_out = ptr::null_mut();
+        let k = arg!(key32(storage_key, key_len));
+        let r = crypto!(crate::group::GroupReceiver::import(&k, arg!(input(blob, blob_len))));
+        *receiver_out = Box::into_raw(Box::new(KaotikGroupReceiver(r)));
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_group_receiver_free(receiver: *mut KaotikGroupReceiver) {
+    if !receiver.is_null() {
+        drop(Box::from_raw(receiver));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +769,26 @@ mod tests {
             assert_eq!(kaotik_verify(spk.ptr, spk.len, msg.as_ptr(), msg.len(), ptr::null(), 0, sig.ptr, sig.len), 1);
             assert_eq!(kaotik_verify(spk.ptr, spk.len, msg.as_ptr(), 4, ptr::null(), 0, sig.ptr, sig.len), 0);
             for b in [&mut ssk, &mut spk, &mut sig] {
+                kaotik_buf_free(b);
+            }
+        }
+    }
+
+    #[test]
+    fn ffi_group() {
+        unsafe {
+            let mut snd: *mut KaotikGroupSender = ptr::null_mut();
+            assert_eq!(kaotik_group_sender_new(b"g".as_ptr(), 1, &mut snd), KAOTIK_OK);
+            let (mut dist, mut ct, mut pt) = (empty(), empty(), empty());
+            kaotik_group_sender_distribution(snd, &mut dist);
+            let mut rcv: *mut KaotikGroupReceiver = ptr::null_mut();
+            assert_eq!(kaotik_group_receiver_new(dist.ptr, dist.len, &mut rcv), KAOTIK_OK);
+            assert_eq!(kaotik_group_encrypt(snd, b"hi".as_ptr(), 2, &mut ct), KAOTIK_OK);
+            assert_eq!(kaotik_group_decrypt(rcv, ct.ptr, ct.len, &mut pt), KAOTIK_OK);
+            assert_eq!(bytes(&pt), b"hi");
+            kaotik_group_sender_free(snd);
+            kaotik_group_receiver_free(rcv);
+            for b in [&mut dist, &mut ct, &mut pt] {
                 kaotik_buf_free(b);
             }
         }

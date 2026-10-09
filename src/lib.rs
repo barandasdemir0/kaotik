@@ -7,6 +7,7 @@ pub mod chaotic;
 pub mod crypto;
 pub mod error;
 pub mod format;
+pub mod group;
 pub mod hashsig;
 pub mod hybrid;
 pub mod keystore;

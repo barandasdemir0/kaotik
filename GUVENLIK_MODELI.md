@@ -25,7 +25,8 @@ Ulaşılabilecek en iyi hedef şudur:
 | `hybrid` | Anahtar anlaşması, `seal_to` | X25519 **+** ML-KEM-1024 (FIPS 203), X-Wing tarzı birleştirici | Eğri **ve** kafes |
 | `hybrid` | İmza | Ed25519 **+** ML-DSA-87 (FIPS 204); ikisi de doğrulanmalı | Eğri **ve** kafes |
 | `hashsig` | Kök kimlik imzası | SLH-DSA-SHAKE-256s (FIPS 205) | Yalnızca hash (en muhafazakâr) |
-| `ratchet` | Sohbet oturumu | KEM tabanlı Double Ratchet + imzalı ön anahtar + karşılıklı kimlik doğrulama | İleri gizlilik + ele geçirme sonrası iyileşme |
+| `ratchet` | Birebir sohbet | KEM tabanlı Double Ratchet + **başlık şifreleme** + imzalı ön anahtar + karşılıklı kimlik doğrulama | İleri gizlilik + ele geçirme sonrası iyileşme |
+| `group` | Grup sohbeti | Sender Keys + hibrit imza (her mesaj imzalı), dağıtım birebir ratchet üzerinden | İleri gizlilik; çıkışta yeniden anahtarlama |
 | `stream` | Büyük dosya/akış | STREAM (parça + son-parça bayrağı), `seal_stream_to` | Kesme/sıra değiştirme tespiti |
 | `keystore` | Anahtar saklama | Argon2id (256 MiB) kutusu; `--features keyring` ile OS anahtar zinciri | Parola gücü / OS güvenliği |
 | `passhash` | Giriş parolaları | Argon2id PHC, `needs_rehash` | Parola gücü |
@@ -35,7 +36,7 @@ Ulaşılabilecek en iyi hedef şudur:
 
 | Platform | Nasıl |
 |----------|-------|
-| Rust | `kaotik::{hybrid, ratchet, stream, keystore, passhash, hashsig}` |
+| Rust | `kaotik::{hybrid, ratchet, group, stream, keystore, passhash, hashsig}` |
 | C / C++ / Go (cgo) / Swift / Kotlin-Java (JNI) / C# (P/Invoke) | `cargo build --release --features ffi` → `libkaotik.{so,dylib,a}` / `kaotik.dll` + `include/kaotik.h` |
 | Python | `bindings/python/kaotik.py` (ctypes, bağımlılık yok) |
 | Web / Node / Deno | `cargo build --target wasm32-unknown-unknown --features wasm --lib` + `wasm-bindgen` (bkz. `bindings/js/README.md`) |
@@ -49,7 +50,10 @@ Ulaşılabilecek en iyi hedef şudur:
   Daha iyisi: `ratchet::Session` — her mesaj ayrı anahtar, her turda yeni KEM anahtarı.
   Oturum durumu `export(cihaz_anahtarı)` ile şifreli saklanır; cihaz anahtarı `keystore::os::device_key`.
   Kullanıcılar birbirinin kimlik anahtarını bir kez yüz yüze/QR ile doğrulamalıdır (MITM'e karşı tek gerçek önlem).
-  Not: KEM tabanlı başlık her mesajda ~3,2 KiB ek yük getirir (kuantum güvenliğinin bedeli).
+  Not: KEM tabanlı (şifreli) başlık her mesajda ~3,3 KiB ek yük getirir (kuantum güvenliğinin bedeli).
+- **Grup sohbeti:** Her üye `group::GroupSender` oluşturur, `distribution()` çıktısını her üyeye birebir
+  `ratchet::Session` ile gönderir; mesajlar bir kez şifrelenip herkese yayınlanır. Üye çıkınca herkes yeni
+  `GroupSender` üretip dağıtır. Grup mesajı başına ~4,7 KiB hibrit imza vardır.
 - **Giriş parolaları:** Sunucuda yalnızca `hash_password` çıktısı; `verify_password` ile kontrol.
 - **Parola kasası / gizli notlar:** Ana parola → Argon2id → kasa anahtarı; kayıtlar `seal` ile.
 - **Dosya:** `seal_to` (alıcı açık anahtarıyla) veya mevcut CLI modları.
@@ -67,16 +71,23 @@ Ulaşılabilecek en iyi hedef şudur:
 - [x] 9. Akış şifreleme (`stream`): sabit bellek, kesme/ekleme/sıra saldırılarına dayanıklı.
 - [x] 10. Anahtar saklama (`keystore`): Argon2id kutusu + OS anahtar zinciri (Keychain / Credential Manager / keyutils).
 - [x] 11. Fuzz hedefleri (`fuzz/`), CI: 3 işletim sistemi test, wasm derleme, `cargo audit`, fuzz duman testi.
-- [ ] 12. **Bağımsız profesyonel güvenlik denetimi** — kod yazarak yapılamaz; dış uzman gerekir.
+- [x] 12. Ratchet başlık şifreleme (meta veri: tur ve mesaj numaraları, KEM anahtarları gizli).
+- [x] 13. Grup sohbeti (`group`, Sender Keys + hibrit imza), FFI ve wasm dahil.
+- [x] 14. Sabit-zaman duman testi: `cargo run --release --example ct_check` (dudect / Welch t-testi).
+- [x] 15. Fuzz'lar gerçekten çalıştırıldı (cargo-fuzz, nightly); CI'da her PR'da tekrar koşar.
+- [x] 16. `vendor_hashes.txt` taşınabilir biçimde yeniden üretildi; CI'da `scripts/vendor_hashes.sh --check`.
+- [x] 17. Tauri masaüstü uygulaması CI'da (Ubuntu 22.04) derleniyor.
+- [ ] 18. **Bağımsız profesyonel güvenlik denetimi** — kod yazarak yapılamaz; dış uzman gerekir.
 
 ### Hâlâ bilinen sınırlar (dürüstçe)
 
 - `ml-kem`, `ml-dsa`, `slh-dsa` (RustCrypto) henüz bağımsız denetimden geçmedi; `slh-dsa` sürüm adayı (rc).
   Hibrit tasarım bu yüzden var: biri hatalıysa klasik bileşen korur.
-- Sabit-zaman davranışı bağımlılıklara emanet; dudect tarzı ölçüm yapılmadı.
-- Ratchet başlıkları şifrelenmiyor (meta veri: tur ve mesaj numarası görünür). Sunucu kimin kiminle
-  ne zaman konuştuğunu görebilir; bunu gizlemek ayrı bir ağ katmanı (ör. sealed sender, Tor) işidir.
-- Grup sohbeti (MLS) yok; birebir oturumlar var.
+- `ct_check` istatistiksel bir duman testidir; sabit-zamanın kanıtı değildir.
+- Başlık şifreli olsa da sunucu mesaj **boyutunu, zamanını, IP adresini ve alıcıyı** görür; bunu gizlemek
+  ağ katmanı işidir (sealed sender, Tor, dolgu/sahte trafik).
+- Grup sohbeti MLS (RFC 9420) değildir: otomatik ele geçirme sonrası iyileşme yok, düzenli yeniden
+  anahtarlama gerekir; çok büyük gruplarda (binlerce üye) MLS daha verimlidir.
 - Cihaz ele geçirilirse (kötü amaçlı yazılım, kilidi açık telefon) hiçbir şifreleme o anki mesajları koruyamaz.
 
 Not: Kaotik (kaotik harita) katmanı kendine özgü ve denetlenmemiş bir yapıdır; güvenlik onun üzerine

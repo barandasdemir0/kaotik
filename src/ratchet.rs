@@ -10,6 +10,8 @@
 //! - **Kimlik doğrulama:** Başlangıçta iki taraf da hibrit imzayla (Ed25519 + ML-DSA-87)
 //!   kimliğini kanıtlar; tüm mesajlar iki kimliğe bağlı `ad` ile doğrulanır.
 //! - **Sırasız teslim:** Atlanan mesaj anahtarları sınırlı sayıda saklanır.
+//! - **Başlık şifreleme:** Tur/mesaj numaraları ve KEM anahtarları başlık anahtarlarıyla şifrelenir
+//!   (Double Ratchet spesifikasyonu §4); ağ gözlemcisi mesajları turlara bağlayamaz.
 //!
 //! Akış:
 //! 1. Alıcı (Bob) `PrekeyBundle::new` ile imzalı ön anahtarını sunucuya koyar, gizli kısmı saklar.
@@ -26,8 +28,10 @@ use hkdf::Hkdf;
 use sha2::{Digest, Sha256, Sha512};
 use zeroize::{Zeroize, Zeroizing};
 
-const VERSION: u8 = 1;
-const HEADER_LEN: usize = 1 + KEM_PUBLIC_LEN + KEM_CIPHERTEXT_LEN + 4 + 4;
+const VERSION: u8 = 2;
+/// Düz başlık: KEM açık anahtarı + KEM şifreli metni + pn + n.
+const HEADER_LEN: usize = KEM_PUBLIC_LEN + KEM_CIPHERTEXT_LEN + 4 + 4;
+const ENC_HEADER_LEN: usize = HEADER_LEN + hybrid::SEAL_OVERHEAD;
 /// Tek seferde atlanabilecek en fazla mesaj (DoS sınırı).
 pub const MAX_SKIP: u32 = 1000;
 /// Saklanan atlanmış anahtar üst sınırı; aşılınca en eskiler silinir.
@@ -91,7 +95,13 @@ pub struct Session {
     prev_n: u32,
     recv_ck: Option<Zeroizing<[u8; 32]>>,
     recv_n: u32,
-    skipped: Vec<([u8; 32], u32, Zeroizing<[u8; 32]>)>,
+    /// Başlık anahtarları (gönderme/alma, mevcut ve bir sonraki tur).
+    hks: Option<Zeroizing<[u8; 32]>>,
+    nhks: Zeroizing<[u8; 32]>,
+    hkr: Option<Zeroizing<[u8; 32]>>,
+    nhkr: Zeroizing<[u8; 32]>,
+    /// Atlanmış mesaj anahtarları: (başlık anahtarı, mesaj no, mesaj anahtarı).
+    skipped: Vec<(Zeroizing<[u8; 32]>, u32, Zeroizing<[u8; 32]>)>,
 }
 
 fn ad_for(initiator: &HybridVerifyingKey, responder: &HybridVerifyingKey) -> [u8; 32] {
@@ -103,49 +113,58 @@ fn ad_for(initiator: &HybridVerifyingKey, responder: &HybridVerifyingKey) -> [u8
     h.finalize().into()
 }
 
-fn pk_id(pk: &[u8]) -> [u8; 32] {
-    Sha256::digest(pk).into()
-}
+type Key = Zeroizing<[u8; 32]>;
 
-/// Kök zinciri: (yeni kök, zincir anahtarı) = HKDF-SHA512(salt = kök, ikm = KEM sırrı).
-fn kdf_rk(root: &[u8; 32], ss: &[u8]) -> (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>) {
+/// Kök zinciri: (yeni kök, zincir anahtarı, sonraki başlık anahtarı) = HKDF-SHA512(salt = kök, ikm = KEM sırrı).
+fn kdf_rk(root: &[u8; 32], ss: &[u8]) -> (Key, Key, Key) {
     let hk = Hkdf::<Sha512>::new(Some(root), ss);
-    let mut okm = Zeroizing::new([0u8; 64]);
-    hk.expand(b"kaotik-ratchet-root", &mut okm[..]).expect("64 <= 255*64");
-    let mut r = Zeroizing::new([0u8; 32]);
-    let mut c = Zeroizing::new([0u8; 32]);
-    r.copy_from_slice(&okm[..32]);
-    c.copy_from_slice(&okm[32..]);
-    (r, c)
+    let mut okm = Zeroizing::new([0u8; 96]);
+    hk.expand(b"kaotik-ratchet-root-v2", &mut okm[..]).expect("96 <= 255*64");
+    (key32(&okm[..32]), key32(&okm[32..64]), key32(&okm[64..]))
 }
 
 /// Mesaj zinciri: (mesaj anahtarı, sonraki zincir anahtarı).
-fn kdf_ck(ck: &[u8; 32]) -> (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>) {
+fn kdf_ck(ck: &[u8; 32]) -> (Key, Key) {
     (derive_subkey(ck, b"ratchet-mk", &[]), derive_subkey(ck, b"ratchet-ck", &[]))
 }
 
-struct Header<'a> {
-    pk: &'a [u8],
-    ct: &'a [u8],
+/// Çözülmüş başlık: gönderenin güncel KEM açık anahtarı, KEM şifreli metni, önceki zincir uzunluğu, mesaj no.
+struct Header {
+    pk: Vec<u8>,
+    ct: Vec<u8>,
     pn: u32,
     n: u32,
 }
 
-fn parse_header(msg: &[u8]) -> Result<(Header<'_>, &[u8], &[u8])> {
-    if msg.len() < HEADER_LEN + hybrid::SEAL_OVERHEAD || msg[0] != VERSION {
+fn decode_header(h: &[u8]) -> Option<Header> {
+    if h.len() != HEADER_LEN {
+        return None;
+    }
+    let pk = h[..KEM_PUBLIC_LEN].to_vec();
+    let ct = h[KEM_PUBLIC_LEN..KEM_PUBLIC_LEN + KEM_CIPHERTEXT_LEN].to_vec();
+    let tail = &h[HEADER_LEN - 8..];
+    Some(Header {
+        pk,
+        ct,
+        pn: u32::from_be_bytes(tail[..4].try_into().ok()?),
+        n: u32::from_be_bytes(tail[4..].try_into().ok()?),
+    })
+}
+
+/// Kablo biçimi: `ver(1) || u32 enc_header_len || seal(HK, header) || seal(MK, body)`.
+fn split_message(msg: &[u8]) -> Result<(&[u8], &[u8])> {
+    if msg.len() < 5 || msg[0] != VERSION {
         return Err(err());
     }
-    let (hdr, body) = msg.split_at(HEADER_LEN);
-    let pk = &hdr[1..1 + KEM_PUBLIC_LEN];
-    let ct = &hdr[1 + KEM_PUBLIC_LEN..1 + KEM_PUBLIC_LEN + KEM_CIPHERTEXT_LEN];
-    let tail = &hdr[HEADER_LEN - 8..];
-    let pn = u32::from_be_bytes(tail[..4].try_into().expect("4"));
-    let n = u32::from_be_bytes(tail[4..].try_into().expect("4"));
-    Ok((Header { pk, ct, pn, n }, hdr, body))
+    let len = u32::from_be_bytes(msg[1..5].try_into().expect("4")) as usize;
+    if len != ENC_HEADER_LEN || msg.len() < 5 + len + hybrid::SEAL_OVERHEAD {
+        return Err(err());
+    }
+    Ok(msg[5..].split_at(len))
 }
 
 impl Session {
-    fn root0(ad: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    fn root0(ad: &[u8; 32]) -> Key {
         derive_subkey(ad, b"ratchet-root0", &[])
     }
 
@@ -159,7 +178,7 @@ impl Session {
         let my_sk = HybridKemSecretKey::generate()?;
         let my_pk = my_sk.public_key().to_bytes();
         let (ct, ss) = bundle.prekey.encapsulate()?;
-        let (root, ck) = kdf_rk(&Self::root0(&ad), &ss[..]);
+        let (root, ck, nhk) = kdf_rk(&Self::root0(&ad), &ss[..]);
         let transcript = [&bundle.prekey.to_bytes()[..], &my_pk, &ct].concat();
         let sig = me.sign(&transcript, CTX_INIT)?;
         let init = [&[VERSION][..], &my_vk.to_bytes(), &my_pk, &ct, &sig].concat();
@@ -174,6 +193,10 @@ impl Session {
             prev_n: 0,
             recv_ck: None,
             recv_n: 0,
+            hks: Some(derive_subkey(&ss[..], b"ratchet-hka", &[])),
+            nhks: nhk,
+            hkr: None,
+            nhkr: derive_subkey(&ss[..], b"ratchet-nhkb", &[]),
             skipped: Vec::new(),
         };
         Ok((s, init))
@@ -197,7 +220,7 @@ impl Session {
         }
         let ad = ad_for(&peer_vk, &me.verifying_key());
         let ss = prekey.decapsulate(ct)?;
-        let (root, ck) = kdf_rk(&Self::root0(&ad), &ss[..]);
+        let (root, ck, nhk) = kdf_rk(&Self::root0(&ad), &ss[..]);
         let s = Self {
             ad,
             root,
@@ -209,6 +232,10 @@ impl Session {
             prev_n: 0,
             recv_ck: Some(ck),
             recv_n: 0,
+            hks: None,
+            nhks: derive_subkey(&ss[..], b"ratchet-nhkb", &[]),
+            hkr: Some(derive_subkey(&ss[..], b"ratchet-hka", &[])),
+            nhkr: nhk,
             skipped: Vec::new(),
         };
         Ok((s, peer_vk))
@@ -218,32 +245,39 @@ impl Session {
         let peer = HybridKemPublicKey::from_bytes(self.peer_pk.as_deref().ok_or_else(err)?)?;
         self.my_sk = HybridKemSecretKey::generate()?;
         let (ct, ss) = peer.encapsulate()?;
-        let (root, ck) = kdf_rk(&self.root, &ss[..]);
+        let (root, ck, nhk) = kdf_rk(&self.root, &ss[..]);
         self.root = root;
         self.send_ck = Some(ck);
         self.send_ct = ct;
         self.prev_n = self.send_n;
         self.send_n = 0;
+        self.hks = Some(std::mem::replace(&mut self.nhks, nhk));
         Ok(())
     }
 
-    /// Mesajı şifreler. `aad` isteğe bağlı ek bağlam (ör. sohbet id).
+    /// Mesajı şifreler. `aad` isteğe bağlı ek bağlam (ör. sohbet id). Başlık da şifrelenir:
+    /// ağdaki gözlemci tur/mesaj numarasını veya KEM anahtarlarını göremez.
     pub fn encrypt(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         if self.send_ck.is_none() {
             self.ratchet_send()?;
         }
         let (mk, next) = kdf_ck(self.send_ck.as_ref().expect("set above"));
         self.send_ck = Some(next);
-        let mut hdr = Vec::with_capacity(HEADER_LEN);
-        hdr.push(VERSION);
+        let mut hdr = Zeroizing::new(Vec::with_capacity(HEADER_LEN));
         hdr.extend_from_slice(&self.my_sk.public_key().to_bytes());
         hdr.extend_from_slice(&self.send_ct);
         hdr.extend_from_slice(&self.prev_n.to_be_bytes());
         hdr.extend_from_slice(&self.send_n.to_be_bytes());
         self.send_n = self.send_n.checked_add(1).ok_or_else(err)?;
-        let body = hybrid::seal(&mk, plaintext, &[&self.ad[..], &hdr, aad].concat())?;
-        hdr.extend_from_slice(&body);
-        Ok(hdr)
+        let hks = self.hks.as_ref().ok_or_else(err)?;
+        let enc_hdr = hybrid::seal(hks, &hdr, &[&self.ad[..], b"hdr"].concat())?;
+        let body = hybrid::seal(&mk, plaintext, &[&self.ad[..], &enc_hdr, aad].concat())?;
+        let mut out = Vec::with_capacity(5 + enc_hdr.len() + body.len());
+        out.push(VERSION);
+        out.extend_from_slice(&(enc_hdr.len() as u32).to_be_bytes());
+        out.extend_from_slice(&enc_hdr);
+        out.extend_from_slice(&body);
+        Ok(out)
     }
 
     /// Mesajı çözer. Başarısız olursa oturum durumu **değişmez**.
@@ -254,25 +288,41 @@ impl Session {
         Ok(pt)
     }
 
+    fn open_header(&self, hk: &[u8; 32], enc_hdr: &[u8]) -> Option<Header> {
+        let raw = hybrid::open(hk, enc_hdr, &[&self.ad[..], b"hdr"].concat()).ok()?;
+        decode_header(&raw)
+    }
+
     fn decrypt_inner(&mut self, msg: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        let (h, hdr, body) = parse_header(msg)?;
-        let full_aad = [&self.ad[..], hdr, aad].concat();
-        let id = pk_id(h.pk);
-        if let Some(i) = self.skipped.iter().position(|(p, n, _)| *p == id && *n == h.n) {
-            let (_, _, mk) = self.skipped.remove(i);
-            return hybrid::open(&mk, body, &full_aad);
+        let (enc_hdr, body) = split_message(msg)?;
+        let full_aad = [&self.ad[..], enc_hdr, aad].concat();
+        // 1) Atlanmış mesaj mı?
+        for i in 0..self.skipped.len() {
+            if let Some(h) = self.open_header(&self.skipped[i].0, enc_hdr) {
+                if let Some(j) = self.skipped.iter().position(|(k, n, _)| k[..] == self.skipped[i].0[..] && *n == h.n) {
+                    let (_, _, mk) = self.skipped.remove(j);
+                    return hybrid::open(&mk, body, &full_aad);
+                }
+            }
         }
-        if self.peer_pk.as_deref() != Some(h.pk) {
-            // Yeni tur: önceki alma zincirinin kalanını sakla, KEM ile kökü ilerlet.
-            self.skip_until(h.pn)?;
-            let ss = self.my_sk.decapsulate(h.ct)?;
-            let (root, ck) = kdf_rk(&self.root, &ss[..]);
-            self.root = root;
-            self.recv_ck = Some(ck);
-            self.recv_n = 0;
-            self.peer_pk = Some(h.pk.to_vec());
-            self.send_ck = None;
-        }
+        // 2) Mevcut alma zinciri mi, yoksa yeni tur mu?
+        let h = match self.hkr.as_ref().and_then(|k| self.open_header(k, enc_hdr)) {
+            Some(h) => h,
+            None => {
+                let h = self.open_header(&self.nhkr, enc_hdr).ok_or_else(err)?;
+                HybridKemPublicKey::from_bytes(&h.pk)?;
+                self.skip_until(h.pn)?;
+                let ss = self.my_sk.decapsulate(&h.ct)?;
+                let (root, ck, nhk) = kdf_rk(&self.root, &ss[..]);
+                self.root = root;
+                self.recv_ck = Some(ck);
+                self.recv_n = 0;
+                self.peer_pk = Some(h.pk.clone());
+                self.send_ck = None;
+                self.hkr = Some(std::mem::replace(&mut self.nhkr, nhk));
+                h
+            }
+        };
         self.skip_until(h.n)?;
         let (mk, next) = kdf_ck(self.recv_ck.as_ref().ok_or_else(err)?);
         self.recv_ck = Some(next);
@@ -281,7 +331,7 @@ impl Session {
     }
 
     fn skip_until(&mut self, until: u32) -> Result<()> {
-        let Some(mut ck) = self.recv_ck.take() else { return Ok(()) };
+        let (Some(mut ck), Some(hk)) = (self.recv_ck.take(), self.hkr.clone()) else { return Ok(()) };
         if until < self.recv_n {
             self.recv_ck = Some(ck);
             return Ok(());
@@ -289,10 +339,9 @@ impl Session {
         if until - self.recv_n > MAX_SKIP {
             return Err(err());
         }
-        let id = pk_id(self.peer_pk.as_deref().unwrap_or_default());
         while self.recv_n < until {
             let (mk, next) = kdf_ck(&ck);
-            self.skipped.push((id, self.recv_n, mk));
+            self.skipped.push((hk.clone(), self.recv_n, mk));
             ck = next;
             self.recv_n += 1;
         }
@@ -319,9 +368,13 @@ impl Session {
         v.extend_from_slice(&self.prev_n.to_be_bytes());
         put_opt(&mut v, self.recv_ck.as_ref().map(|k| &k[..]));
         v.extend_from_slice(&self.recv_n.to_be_bytes());
+        put_opt(&mut v, self.hks.as_ref().map(|k| &k[..]));
+        v.extend_from_slice(&self.nhks[..]);
+        put_opt(&mut v, self.hkr.as_ref().map(|k| &k[..]));
+        v.extend_from_slice(&self.nhkr[..]);
         v.extend_from_slice(&(self.skipped.len() as u32).to_be_bytes());
-        for (p, n, mk) in &self.skipped {
-            v.extend_from_slice(p);
+        for (hk, n, mk) in &self.skipped {
+            v.extend_from_slice(&hk[..]);
             v.extend_from_slice(&n.to_be_bytes());
             v.extend_from_slice(&mk[..]);
         }
@@ -343,20 +396,27 @@ impl Session {
         let prev_n = r.u32()?;
         let recv_ck = r.opt()?.map(key32_checked).transpose()?;
         let recv_n = r.u32()?;
+        let hks = r.opt()?.map(key32_checked).transpose()?;
+        let nhks = key32(r.take(32)?);
+        let hkr = r.opt()?.map(key32_checked).transpose()?;
+        let nhkr = key32(r.take(32)?);
         let count = r.u32()? as usize;
         if count > MAX_SKIPPED_STORED {
             return Err(err());
         }
         let mut skipped = Vec::with_capacity(count);
         for _ in 0..count {
-            let p: [u8; 32] = r.take(32)?.try_into().expect("32");
+            let hk = key32(r.take(32)?);
             let n = r.u32()?;
-            skipped.push((p, n, key32(r.take(32)?)));
+            skipped.push((hk, n, key32(r.take(32)?)));
         }
         if !r.0.is_empty() {
             return Err(err());
         }
-        Ok(Self { ad, root, my_sk, peer_pk, send_ck, send_ct, send_n, prev_n, recv_ck, recv_n, skipped })
+        Ok(Self {
+            ad, root, my_sk, peer_pk, send_ck, send_ct, send_n, prev_n, recv_ck, recv_n,
+            hks, nhks, hkr, nhkr, skipped,
+        })
     }
 
     /// Oturum durumunu 32 baytlık depolama anahtarıyla şifreleyerek dışa aktarır.
@@ -482,6 +542,41 @@ mod tests {
         let r = b2.encrypt(b"back", b"").unwrap();
         assert_eq!(&a.decrypt(&r, b"").unwrap()[..], b"back");
         assert!(Session::import(&hybrid::generate_key().unwrap(), &blob).is_err());
+    }
+
+    #[test]
+    fn headers_are_encrypted() {
+        let (mut a, mut b) = pair();
+        let m1 = a.encrypt(b"x", b"").unwrap();
+        let m2 = a.encrypt(b"x", b"").unwrap();
+        let my_pk = a.my_sk.public_key().to_bytes();
+        // Açık anahtar veya sayaç düz metin olarak görünmemeli.
+        assert!(!m1.windows(64).any(|w| w == &my_pk[..64]));
+        assert_ne!(m1[5..40], m2[5..40]);
+        b.decrypt(&m2, b"").unwrap();
+        b.decrypt(&m1, b"").unwrap();
+        // Rastgele (başka oturumun) mesajı açılamaz.
+        let (mut c, _) = pair();
+        assert!(b.decrypt(&c.encrypt(b"y", b"").unwrap(), b"").is_err());
+    }
+
+    #[test]
+    fn long_out_of_order_across_turns() {
+        let (mut a, mut b) = pair();
+        let mut pending = Vec::new();
+        for turn in 0..4u8 {
+            for i in 0..3u8 {
+                pending.push((a.encrypt(&[turn, i], b"").unwrap(), [turn, i]));
+            }
+            // Her turda yalnız son mesaj ulaşır, b cevap verir.
+            let (m, p) = pending.pop().unwrap();
+            assert_eq!(&b.decrypt(&m, b"").unwrap()[..], &p);
+            let r = b.encrypt(b"ack", b"").unwrap();
+            a.decrypt(&r, b"").unwrap();
+        }
+        for (m, p) in pending.iter().rev() {
+            assert_eq!(&b.decrypt(m, b"").unwrap()[..], p);
+        }
     }
 
     #[test]
