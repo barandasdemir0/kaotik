@@ -1,0 +1,33 @@
+[package]
+name = "kaotik-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kaotik = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "open"
+path = "fuzz_targets/open.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ratchet_decrypt"
+path = "fuzz_targets/ratchet_decrypt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "parsers"
+path = "fuzz_targets/parsers.rs"
+test = false
+doc = false

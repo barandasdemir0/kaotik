@@ -17,11 +17,16 @@ if (-not (Test-Path $VendorDir)) {
 }
 
 Set-Location $ProjectRoot
-$hashes = Get-ChildItem -Recurse -File $VendorDir | ForEach-Object {
-    $hash = Get-FileHash $_.FullName -Algorithm SHA256
-    "$($hash.Hash) $($_.FullName)"
+# Taşınabilir biçim (scripts/vendor_hashes.sh ile aynı): göreli yol, "/" ayırıcı, bayt sıralı, LF, BOM yok.
+$files = Get-ChildItem -Recurse -File $VendorDir | ForEach-Object {
+    ($_.FullName.Substring($ProjectRoot.Length + 1)) -replace '\\', '/'
 }
-$hashes | Out-File -FilePath $OutPath -Encoding utf8
+$files = [string[]]$files
+[Array]::Sort($files, [StringComparer]::Ordinal)
+$hashes = foreach ($rel in $files) {
+    "$((Get-FileHash (Join-Path $ProjectRoot $rel) -Algorithm SHA256).Hash) $rel"
+}
+[IO.File]::WriteAllText($OutPath, (($hashes -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
 
 if ($Check) {
     $refPath = Join-Path $ProjectRoot "vendor_hashes.txt"
@@ -29,7 +34,7 @@ if ($Check) {
         Write-Warning "vendor_hashes.txt yok. Once hash'leri olusturun: .\scripts\vendor_hashes.ps1"
         exit 0
     }
-    $ref = Get-Content $refPath
+    $ref = Get-Content $refPath -Encoding utf8
     $diff = Compare-Object $ref $hashes
     if ($diff) {
         Write-Host "UYARI: vendor/ icerigi degismis!" -ForegroundColor Red

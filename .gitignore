@@ -1,0 +1,6 @@
+/target/
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+/bindings/**/__pycache__/
+vendor_hashes_check.*

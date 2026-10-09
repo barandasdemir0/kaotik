@@ -56,6 +56,7 @@ Periyodik kontrol:
 
 ```powershell
 .\scripts\vendor_hashes.ps1 -Check
+# Linux/macOS: scripts/vendor_hashes.sh --check
 ```
 
 Fark varsa script uyarır; çıktı boşsa vendor değişmemiştir.

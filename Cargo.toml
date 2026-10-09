@@ -6,6 +6,7 @@ description = "Kaotik Sifreleme - platform-independent crypto library and CLI"
 license = "MIT"
 
 [lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
 name = "kaotik"
 path = "src/lib.rs"
 
@@ -15,8 +16,9 @@ path = "src/main.rs"
 
 [features]
 default = []
-wasm = []   # wasm32-unknown-unknown (kaotik/aes only, no Kyber)
+wasm = ["dep:wasm-bindgen"]   # wasm32: wasm-bindgen JS API (legacy Kyber-768 file mode excluded)
 ffi = []    # C FFI (no_mangle extern "C")
+keyring = ["dep:keyring"]
 
 [dependencies]
 getrandom = "0.2"
@@ -25,8 +27,26 @@ sha2 = "0.10"
 pbkdf2 = "0.12"
 hkdf = "0.12"
 argon2 = "0.5"
-pqcrypto-kyber = "0.8"
-zeroize = "1.7"
-pqcrypto-traits = "0.3.5"
+zeroize = { version = "1.7", features = ["derive"] }
 clap = { version = "4.4", features = ["derive"] }
 subtle = "2.6"
+ml-kem = { version = "0.3.2", features = ["getrandom"] }
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc"] }
+x25519-dalek = "3.0.0"
+ed25519-dalek = { version = "3.0.0", features = ["zeroize"] }
+chacha20poly1305 = "0.11.0"
+slh-dsa = { version = "0.2.0-rc.5", features = ["zeroize"] }
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "linux-native"], optional = true }
+wasm-bindgen = { version = "0.2.100", optional = true }
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pqcrypto-kyber = "0.8"
+pqcrypto-traits = "0.3.5"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
