@@ -1,6 +1,6 @@
-target/
+/target/
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
-__pycache__/
+/bindings/**/__pycache__/
 vendor_hashes_check.*
