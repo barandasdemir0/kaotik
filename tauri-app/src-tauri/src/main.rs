@@ -8,7 +8,8 @@ fn normalize_mode(mode: &str) -> Result<&str, String> {
         "kaotik" => Ok("kaotik"),
         "aes" => Ok("aes"),
         "kyber" => Ok("kyber"),
-        _ => Err("Invalid mode. Use kaotik, aes, or kyber.".to_string()),
+        "pq" => Ok("pq"),
+        _ => Err("Invalid mode. Use pq, kaotik, aes, or kyber.".to_string()),
     }
 }
 
@@ -41,6 +42,9 @@ fn encrypt_file(
     let result = match mode {
         "kaotik" => kaotik::encrypt_kaotik(reader, writer, &pwd),
         "aes" => kaotik::encrypt_aes(reader, writer, &pwd),
+        "pq" => kaotik::validate_password(&pwd).and_then(|_| {
+            kaotik::keystore::lock_stream(&pwd, kaotik::keystore::KdfParams::default(), reader, writer)
+        }),
         "kyber" => {
             let key_path = key_path.ok_or_else(|| "Kyber mode requires key_path".to_string())?;
             let mut key_out = File::create(&key_path).map_err(|e| e.to_string())?;
@@ -70,6 +74,7 @@ fn decrypt_file(
     let result = match mode {
         "kaotik" => kaotik::decrypt_kaotik(reader, writer, &pwd),
         "aes" => kaotik::decrypt_aes(reader, writer, &pwd),
+        "pq" => kaotik::keystore::unlock_stream(&pwd, reader, writer),
         "kyber" => {
             let key_path = key_path.ok_or_else(|| "Kyber mode requires key_path".to_string())?;
             let mut key_reader = File::open(&key_path).map_err(|e| e.to_string())?;

@@ -62,6 +62,33 @@ int32_t kaotik_sign(const uint8_t *secret_key, size_t secret_len, const uint8_t 
 int32_t kaotik_verify(const uint8_t *public_key, size_t public_len, const uint8_t *msg, size_t msg_len,
                       const uint8_t *ctx, size_t ctx_len, const uint8_t *sig, size_t sig_len);
 
+/* Hash-only signatures: SLH-DSA-SHAKE-256s (FIPS 205) — for long-lived root identities */
+int32_t kaotik_slh_keypair(KaotikBuf *secret_out, KaotikBuf *public_out);
+int32_t kaotik_slh_sign(const uint8_t *secret_key, size_t secret_len, const uint8_t *msg, size_t msg_len,
+                        const uint8_t *ctx, size_t ctx_len, KaotikBuf *sig_out);
+int32_t kaotik_slh_verify(const uint8_t *public_key, size_t public_len, const uint8_t *msg, size_t msg_len,
+                          const uint8_t *ctx, size_t ctx_len, const uint8_t *sig, size_t sig_len);
+
+/* Post-quantum Double Ratchet chat sessions (opaque handle) */
+typedef struct KaotikSession KaotikSession;
+int32_t kaotik_prekey_bundle(const uint8_t *identity_secret, size_t identity_len,
+                             KaotikBuf *bundle_out, KaotikBuf *prekey_secret_out);
+int32_t kaotik_session_initiate(const uint8_t *identity_secret, size_t identity_len,
+                                const uint8_t *bundle, size_t bundle_len,
+                                KaotikSession **session_out, KaotikBuf *init_out);
+int32_t kaotik_session_respond(const uint8_t *identity_secret, size_t identity_len,
+                               const uint8_t *prekey_secret, size_t prekey_len,
+                               const uint8_t *init, size_t init_len,
+                               KaotikSession **session_out, KaotikBuf *peer_identity_out);
+int32_t kaotik_session_encrypt(KaotikSession *s, const uint8_t *msg, size_t msg_len,
+                               const uint8_t *aad, size_t aad_len, KaotikBuf *out);
+int32_t kaotik_session_decrypt(KaotikSession *s, const uint8_t *msg, size_t msg_len,
+                               const uint8_t *aad, size_t aad_len, KaotikBuf *out);
+int32_t kaotik_session_export(const KaotikSession *s, const uint8_t *storage_key, size_t key_len, KaotikBuf *out);
+int32_t kaotik_session_import(const uint8_t *storage_key, size_t key_len, const uint8_t *blob, size_t blob_len,
+                              KaotikSession **session_out);
+void    kaotik_session_free(KaotikSession *s);
+
 #ifdef __cplusplus
 }
 #endif

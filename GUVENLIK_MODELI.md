@@ -17,26 +17,39 @@ Ulaşılabilecek en iyi hedef şudur:
 > (Kerckhoffs ilkesi). Kaynak kodu herkes görebilir; anahtar yoksa çözülemez. Bu yüzden kodu
 > gizlemek koruma sağlamaz; anahtarı ve cihazı korumak sağlar.
 
-## Şu an kütüphanede olanlar (`src/hybrid.rs`, `src/passhash.rs`, `src/ffi.rs`)
+## Kütüphanede olanlar
 
-| Katman | Algoritma | Kuantum sonrası durum |
-|--------|-----------|-----------------------|
-| Simetrik | XChaCha20-Poly1305, 256-bit anahtar | Grover sonrası ~128 bit — güvenli |
-| Anahtar anlaşması | X25519 **+** ML-KEM-1024 (FIPS 203, kategori 5), X-Wing tarzı HKDF-SHA512 birleştirici | Hibrit |
-| İmza | Ed25519 (strict) **+** ML-DSA-87 (FIPS 204, kategori 5, hedged); ikisi birden doğrulanmalı | Hibrit |
-| Açık anahtarla şifreleme | `seal_to` / `open_from` (KEM ciphertext AAD'ye bağlı) | Hibrit |
-| Giriş parolaları | Argon2id PHC hash (64 MiB, t=3), `needs_rehash` | Parola gücüne bağlı |
-| Dosya (eski) | Kaotik / AES-GCM / Kyber-768 modları | Geri uyumluluk için duruyor |
+| Modül | İşlev | Algoritma | Dayandığı varsayım |
+|-------|-------|-----------|--------------------|
+| `hybrid` | Simetrik `seal`/`open` | XChaCha20-Poly1305, 256-bit | Grover sonrası ~128 bit |
+| `hybrid` | Anahtar anlaşması, `seal_to` | X25519 **+** ML-KEM-1024 (FIPS 203), X-Wing tarzı birleştirici | Eğri **ve** kafes |
+| `hybrid` | İmza | Ed25519 **+** ML-DSA-87 (FIPS 204); ikisi de doğrulanmalı | Eğri **ve** kafes |
+| `hashsig` | Kök kimlik imzası | SLH-DSA-SHAKE-256s (FIPS 205) | Yalnızca hash (en muhafazakâr) |
+| `ratchet` | Sohbet oturumu | KEM tabanlı Double Ratchet + imzalı ön anahtar + karşılıklı kimlik doğrulama | İleri gizlilik + ele geçirme sonrası iyileşme |
+| `stream` | Büyük dosya/akış | STREAM (parça + son-parça bayrağı), `seal_stream_to` | Kesme/sıra değiştirme tespiti |
+| `keystore` | Anahtar saklama | Argon2id (256 MiB) kutusu; `--features keyring` ile OS anahtar zinciri | Parola gücü / OS güvenliği |
+| `passhash` | Giriş parolaları | Argon2id PHC, `needs_rehash` | Parola gücü |
+| (eski) | Dosya modları | Kaotik / AES-GCM / Kyber-768 | Geri uyumluluk |
 
-Her yerde aynı API: Rust (`kaotik::hybrid`, `kaotik::passhash`) ve C ABI (`include/kaotik.h`,
-`--features ffi`) → C/C++, C#, Python (ctypes/cffi), Go (cgo), Swift, Kotlin/Java (JNI), Node (ffi-napi).
+### Bağlamalar
+
+| Platform | Nasıl |
+|----------|-------|
+| Rust | `kaotik::{hybrid, ratchet, stream, keystore, passhash, hashsig}` |
+| C / C++ / Go (cgo) / Swift / Kotlin-Java (JNI) / C# (P/Invoke) | `cargo build --release --features ffi` → `libkaotik.{so,dylib,a}` / `kaotik.dll` + `include/kaotik.h` |
+| Python | `bindings/python/kaotik.py` (ctypes, bağımlılık yok) |
+| Web / Node / Deno | `cargo build --target wasm32-unknown-unknown --features wasm --lib` + `wasm-bindgen` (bkz. `bindings/js/README.md`) |
+| Masaüstü | Tauri uygulamasında yeni `pq` modu (XChaCha20 + Argon2id, sınırsız boyut) |
 
 ## Uygulama türüne göre kullanım
 
 - **Sohbet uygulaması:** Her kullanıcı bir KEM + imza anahtar çifti üretir; açık anahtarlar sunucuda
   yayınlanır. Oturum açılışında `kem_encapsulate` ile ortak sır → `derive_subkey` ile yön bazlı anahtarlar
   → her mesaj `seal(key, msg, aad = sohbet_id||gönderen||sıra_no)`. Kimlik doğrulama için `sign/verify`.
-  *İleri gizlilik için Double Ratchet henüz yok (bkz. Adım 6).*
+  Daha iyisi: `ratchet::Session` — her mesaj ayrı anahtar, her turda yeni KEM anahtarı.
+  Oturum durumu `export(cihaz_anahtarı)` ile şifreli saklanır; cihaz anahtarı `keystore::os::device_key`.
+  Kullanıcılar birbirinin kimlik anahtarını bir kez yüz yüze/QR ile doğrulamalıdır (MITM'e karşı tek gerçek önlem).
+  Not: KEM tabanlı başlık her mesajda ~3,2 KiB ek yük getirir (kuantum güvenliğinin bedeli).
 - **Giriş parolaları:** Sunucuda yalnızca `hash_password` çıktısı; `verify_password` ile kontrol.
 - **Parola kasası / gizli notlar:** Ana parola → Argon2id → kasa anahtarı; kayıtlar `seal` ile.
 - **Dosya:** `seal_to` (alıcı açık anahtarıyla) veya mevcut CLI modları.
@@ -47,14 +60,24 @@ Her yerde aynı API: Rust (`kaotik::hybrid`, `kaotik::passhash`) ve C ABI (`incl
 - [x] 2. Ham anahtarla `seal/open` (parola kuralı ve yapay bekleme yok).
 - [x] 3. Parola hash/doğrulama (Argon2id PHC).
 - [x] 4. Hibrit KEM (X25519 + ML-KEM-1024) ve hibrit imza (Ed25519 + ML-DSA-87).
-- [x] 5. Çevrimdışı vendor derlemesi onarıldı (`vendor/** -text`), `target/` git'ten çıkarıldı.
-- [ ] 6. Sohbet için PQ Double Ratchet (ileri gizlilik + ele geçirme sonrası iyileşme), oturum durumu şifreli saklama.
-- [ ] 7. Hash tabanlı yedek imza: SLH-DSA (FIPS 205) — yalnızca hash fonksiyonlarına dayanır, en muhafazakâr seçenek.
-- [ ] 8. Bağlamalar: wasm-bindgen (web), UniFFI (Kotlin/Swift/Python), Tauri arayüzünü yeni API'ye taşıma.
-- [ ] 9. Akış (streaming) `seal` — çok büyük dosyalar için parçalı XChaCha (STREAM yapısı).
-- [ ] 10. Anahtar saklama: işletim sistemi anahtar zinciri / Secure Enclave / TPM / donanım anahtarı entegrasyonu.
-- [ ] 11. Fuzzing (cargo-fuzz), sabit-zaman testleri (dudect), test vektörleri, `cargo audit` CI.
-- [ ] 12. Bağımsız profesyonel güvenlik denetimi — “güvenli” iddiası için tek gerçek kanıt.
+- [x] 5. Çevrimdışı vendor derlemesi onarıldı, `target/` git'ten çıkarıldı.
+- [x] 6. PQ Double Ratchet (`ratchet`): imzalı ön anahtar, karşılıklı kimlik doğrulama, sırasız teslim, replay reddi, hatada durum geri alma, şifreli dışa aktarma.
+- [x] 7. SLH-DSA-SHAKE-256s (`hashsig`) — kök kimlik anahtarları için.
+- [x] 8. Bağlamalar: C ABI (ratchet dahil), Python, WebAssembly; Tauri'de `pq` modu.
+- [x] 9. Akış şifreleme (`stream`): sabit bellek, kesme/ekleme/sıra saldırılarına dayanıklı.
+- [x] 10. Anahtar saklama (`keystore`): Argon2id kutusu + OS anahtar zinciri (Keychain / Credential Manager / keyutils).
+- [x] 11. Fuzz hedefleri (`fuzz/`), CI: 3 işletim sistemi test, wasm derleme, `cargo audit`, fuzz duman testi.
+- [ ] 12. **Bağımsız profesyonel güvenlik denetimi** — kod yazarak yapılamaz; dış uzman gerekir.
+
+### Hâlâ bilinen sınırlar (dürüstçe)
+
+- `ml-kem`, `ml-dsa`, `slh-dsa` (RustCrypto) henüz bağımsız denetimden geçmedi; `slh-dsa` sürüm adayı (rc).
+  Hibrit tasarım bu yüzden var: biri hatalıysa klasik bileşen korur.
+- Sabit-zaman davranışı bağımlılıklara emanet; dudect tarzı ölçüm yapılmadı.
+- Ratchet başlıkları şifrelenmiyor (meta veri: tur ve mesaj numarası görünür). Sunucu kimin kiminle
+  ne zaman konuştuğunu görebilir; bunu gizlemek ayrı bir ağ katmanı (ör. sealed sender, Tor) işidir.
+- Grup sohbeti (MLS) yok; birebir oturumlar var.
+- Cihaz ele geçirilirse (kötü amaçlı yazılım, kilidi açık telefon) hiçbir şifreleme o anki mesajları koruyamaz.
 
 Not: Kaotik (kaotik harita) katmanı kendine özgü ve denetlenmemiş bir yapıdır; güvenlik onun üzerine
 değil, altındaki standart algoritmalara dayanmalıdır. Yeni uygulamalarda `hybrid` API'si önerilir.

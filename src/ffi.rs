@@ -12,6 +12,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use crate::hybrid::{self, HybridKemPublicKey, HybridKemSecretKey, HybridSigningKey, HybridVerifyingKey};
+use crate::ratchet::{PrekeyBundle, Session};
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::{ptr, slice};
@@ -375,6 +376,204 @@ pub unsafe extern "C" fn kaotik_verify(
     })
 }
 
+// --- SLH-DSA (yalnızca hash tabanlı imza) ---------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_slh_keypair(secret_out: *mut KaotikBuf, public_out: *mut KaotikBuf) -> i32 {
+    guard(|| {
+        if !reset(secret_out) || !reset(public_out) {
+            return KAOTIK_ERR_ARG;
+        }
+        let sk = crypto!(crate::hashsig::SlhSigningKey::generate());
+        emit(public_out, sk.verifying_key().to_bytes());
+        emit(secret_out, sk.to_bytes().to_vec());
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_slh_sign(
+    secret_key: *const u8, secret_len: usize,
+    msg: *const u8, msg_len: usize,
+    ctx: *const u8, ctx_len: usize,
+    sig_out: *mut KaotikBuf,
+) -> i32 {
+    guard(|| {
+        if !reset(sig_out) {
+            return KAOTIK_ERR_ARG;
+        }
+        let sk = crypto!(crate::hashsig::SlhSigningKey::from_bytes(arg!(input(secret_key, secret_len))));
+        emit(sig_out, crypto!(sk.sign(arg!(input(msg, msg_len)), arg!(input(ctx, ctx_len)))));
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_slh_verify(
+    public_key: *const u8, public_len: usize,
+    msg: *const u8, msg_len: usize,
+    ctx: *const u8, ctx_len: usize,
+    sig: *const u8, sig_len: usize,
+) -> i32 {
+    guard(|| {
+        let (Some(pk), Some(m), Some(c), Some(s)) =
+            (input(public_key, public_len), input(msg, msg_len), input(ctx, ctx_len), input(sig, sig_len))
+        else {
+            return 0;
+        };
+        match crate::hashsig::SlhVerifyingKey::from_bytes(pk) {
+            Ok(vk) => vk.verify(m, c, s) as i32,
+            Err(_) => 0,
+        }
+    })
+}
+
+// --- Double Ratchet oturumu (opak tutamaç) ---------------------------------------
+
+/// Opak oturum tutamacı; `kaotik_session_free` ile serbest bırakılır.
+pub struct KaotikSession(Session);
+
+unsafe fn put_session(out: *mut *mut KaotikSession, s: Session) {
+    *out = Box::into_raw(Box::new(KaotikSession(s)));
+}
+
+/// İmzalı ön anahtar paketi: `bundle_out` sunucuya yayınlanır, `prekey_secret_out` cihazda saklanır.
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_prekey_bundle(
+    identity_secret: *const u8, identity_len: usize,
+    bundle_out: *mut KaotikBuf,
+    prekey_secret_out: *mut KaotikBuf,
+) -> i32 {
+    guard(|| {
+        if !reset(bundle_out) || !reset(prekey_secret_out) {
+            return KAOTIK_ERR_ARG;
+        }
+        let id = crypto!(HybridSigningKey::from_bytes(arg!(input(identity_secret, identity_len))));
+        let (bundle, sk) = crypto!(PrekeyBundle::new(&id));
+        emit(bundle_out, bundle.to_bytes());
+        emit(prekey_secret_out, sk.to_bytes().to_vec());
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_session_initiate(
+    identity_secret: *const u8, identity_len: usize,
+    bundle: *const u8, bundle_len: usize,
+    session_out: *mut *mut KaotikSession,
+    init_out: *mut KaotikBuf,
+) -> i32 {
+    guard(|| {
+        if session_out.is_null() || !reset(init_out) {
+            return KAOTIK_ERR_ARG;
+        }
+        *session_out = ptr::null_mut();
+        let id = crypto!(HybridSigningKey::from_bytes(arg!(input(identity_secret, identity_len))));
+        let b = crypto!(PrekeyBundle::from_bytes(arg!(input(bundle, bundle_len))));
+        let (s, init) = crypto!(Session::initiate(&id, &b));
+        put_session(session_out, s);
+        emit(init_out, init);
+        KAOTIK_OK
+    })
+}
+
+/// `peer_identity_out`: başlatanın hibrit doğrulama anahtarı — uygulama bunu kişi rehberiyle karşılaştırmalı.
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_session_respond(
+    identity_secret: *const u8, identity_len: usize,
+    prekey_secret: *const u8, prekey_len: usize,
+    init: *const u8, init_len: usize,
+    session_out: *mut *mut KaotikSession,
+    peer_identity_out: *mut KaotikBuf,
+) -> i32 {
+    guard(|| {
+        if session_out.is_null() || !reset(peer_identity_out) {
+            return KAOTIK_ERR_ARG;
+        }
+        *session_out = ptr::null_mut();
+        let id = crypto!(HybridSigningKey::from_bytes(arg!(input(identity_secret, identity_len))));
+        let pk = crypto!(HybridKemSecretKey::from_bytes(arg!(input(prekey_secret, prekey_len))));
+        let (s, peer) = crypto!(Session::respond(&id, &pk, arg!(input(init, init_len))));
+        put_session(session_out, s);
+        emit(peer_identity_out, peer.to_bytes());
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_session_encrypt(
+    session: *mut KaotikSession,
+    msg: *const u8, msg_len: usize,
+    aad: *const u8, aad_len: usize,
+    out: *mut KaotikBuf,
+) -> i32 {
+    guard(|| {
+        if session.is_null() || !reset(out) {
+            return KAOTIK_ERR_ARG;
+        }
+        emit(out, crypto!((*session).0.encrypt(arg!(input(msg, msg_len)), arg!(input(aad, aad_len)))));
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_session_decrypt(
+    session: *mut KaotikSession,
+    msg: *const u8, msg_len: usize,
+    aad: *const u8, aad_len: usize,
+    out: *mut KaotikBuf,
+) -> i32 {
+    guard(|| {
+        if session.is_null() || !reset(out) {
+            return KAOTIK_ERR_ARG;
+        }
+        let pt = crypto!((*session).0.decrypt(arg!(input(msg, msg_len)), arg!(input(aad, aad_len))));
+        emit(out, pt.to_vec());
+        KAOTIK_OK
+    })
+}
+
+/// Oturumu 32 baytlık depolama anahtarıyla şifreli dışa aktarır (her mesajdan sonra kaydedin).
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_session_export(
+    session: *const KaotikSession,
+    storage_key: *const u8, key_len: usize,
+    out: *mut KaotikBuf,
+) -> i32 {
+    guard(|| {
+        if session.is_null() || !reset(out) {
+            return KAOTIK_ERR_ARG;
+        }
+        let k = arg!(key32(storage_key, key_len));
+        emit(out, crypto!((*session).0.export(&k)));
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_session_import(
+    storage_key: *const u8, key_len: usize,
+    blob: *const u8, blob_len: usize,
+    session_out: *mut *mut KaotikSession,
+) -> i32 {
+    guard(|| {
+        if session_out.is_null() {
+            return KAOTIK_ERR_ARG;
+        }
+        *session_out = ptr::null_mut();
+        let k = arg!(key32(storage_key, key_len));
+        put_session(session_out, crypto!(Session::import(&k, arg!(input(blob, blob_len)))));
+        KAOTIK_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn kaotik_session_free(session: *mut KaotikSession) {
+    if !session.is_null() {
+        drop(Box::from_raw(session));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +608,36 @@ mod tests {
             assert_eq!(kaotik_verify(spk.ptr, spk.len, msg.as_ptr(), 4, ptr::null(), 0, sig.ptr, sig.len), 0);
             for b in [&mut ssk, &mut spk, &mut sig] {
                 kaotik_buf_free(b);
+            }
+        }
+    }
+
+    #[test]
+    fn ffi_ratchet_session() {
+        unsafe {
+            let (mut a_id, mut a_pub, mut b_id, mut b_pub) = (empty(), empty(), empty(), empty());
+            kaotik_sign_keypair(&mut a_id, &mut a_pub);
+            kaotik_sign_keypair(&mut b_id, &mut b_pub);
+            let (mut bundle, mut pre) = (empty(), empty());
+            assert_eq!(kaotik_prekey_bundle(b_id.ptr, b_id.len, &mut bundle, &mut pre), KAOTIK_OK);
+            let (mut a, mut b): (*mut KaotikSession, *mut KaotikSession) = (ptr::null_mut(), ptr::null_mut());
+            let (mut init, mut who) = (empty(), empty());
+            assert_eq!(kaotik_session_initiate(a_id.ptr, a_id.len, bundle.ptr, bundle.len, &mut a, &mut init), KAOTIK_OK);
+            assert_eq!(kaotik_session_respond(b_id.ptr, b_id.len, pre.ptr, pre.len, init.ptr, init.len, &mut b, &mut who), KAOTIK_OK);
+            assert_eq!(bytes(&who), bytes(&a_pub));
+            let (mut ct, mut pt) = (empty(), empty());
+            assert_eq!(kaotik_session_encrypt(a, b"hey".as_ptr(), 3, ptr::null(), 0, &mut ct), KAOTIK_OK);
+            let key = [3u8; 32];
+            let mut blob = empty();
+            assert_eq!(kaotik_session_export(b, key.as_ptr(), 32, &mut blob), KAOTIK_OK);
+            kaotik_session_free(b);
+            assert_eq!(kaotik_session_import(key.as_ptr(), 32, blob.ptr, blob.len, &mut b), KAOTIK_OK);
+            assert_eq!(kaotik_session_decrypt(b, ct.ptr, ct.len, ptr::null(), 0, &mut pt), KAOTIK_OK);
+            assert_eq!(bytes(&pt), b"hey");
+            kaotik_session_free(a);
+            kaotik_session_free(b);
+            for x in [&mut a_id, &mut a_pub, &mut b_id, &mut b_pub, &mut bundle, &mut pre, &mut init, &mut who, &mut ct, &mut pt, &mut blob] {
+                kaotik_buf_free(x);
             }
         }
     }
