@@ -58,8 +58,10 @@ pub fn derive_key_argon2_strong(password: &str, salt: &[u8]) -> Result<[u8; KEY_
 /// kdf: 0 = PBKDF2, 1 = Argon2id, 2 = Argon2id güçlü. Bilinmeyen değer reddedilir.
 pub fn derive_key(password: &str, salt: &[u8], kdf: u8) -> Result<[u8; KEY_LEN]> {
     // Fuzz derlemesinde (cargo fuzz, cfg(fuzzing)) Argon2 maliyeti ayrıştırıcıları test etmeyi imkânsızlaştırır.
+    // Ucuz yol yalnızca fuzz hedefi bu değişkeni ayarladığında açılır: yanlışlıkla `--cfg fuzzing`
+    // ile derlenen normal bir sürüm yine gerçek Argon2 kullanır.
     #[cfg(fuzzing)]
-    if kdf <= KDF_ARGON2_STRONG {
+    if kdf <= KDF_ARGON2_STRONG && std::env::var_os("KAOTIK_FUZZ_CHEAP_KDF").is_some() {
         let okm = hkdf_expand(password.as_bytes(), &[kdf], KEY_LEN, Some(salt))?;
         return Ok(okm.try_into().expect("KEY_LEN"));
     }
@@ -184,6 +186,93 @@ pub fn aes_gcm_decrypt_aad(
         .map_err(|_| Error::Crypto("Decryption failed".into()))
 }
 
+/// Zincirleme (cascade) AEAD: içte XChaCha20-Poly1305, dışta AES-256-GCM; anahtarlar HKDF ile bağımsız.
+/// İki farklı tasarıma (ARX akış şifresi + blok şifre) dayanır: biri kırılsa diğeri gizliliği ve bütünlüğü korur.
+/// `nonce` anahtar başına benzersiz olmalıdır (çağıranlar rastgele veya STREAM nonce'u verir).
+pub fn cascade_encrypt(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    let mut kx = subkey(key, b"kaotik-v8-xchacha20poly1305")?;
+    let mut ka = subkey(key, b"kaotik-v8-aes256gcm")?;
+    let inner = chacha20poly1305::XChaCha20Poly1305::new_from_slice(&kx)
+        .map_err(|_| Error::Crypto("Invalid key".into()))?
+        .encrypt(
+            &xnonce(nonce).into(),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|e| Error::Crypto(e.to_string()));
+    secure_zero(&mut kx);
+    let outer = inner.and_then(|i| aes_gcm_encrypt_aad(&ka, nonce, &i, aad));
+    secure_zero(&mut ka);
+    outer
+}
+
+pub fn cascade_decrypt(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    let mut ka = subkey(key, b"kaotik-v8-aes256gcm")?;
+    let inner = aes_gcm_decrypt_aad(&ka, nonce, ciphertext, aad);
+    secure_zero(&mut ka);
+    let inner = zeroize::Zeroizing::new(inner?);
+    let mut kx = subkey(key, b"kaotik-v8-xchacha20poly1305")?;
+    let pt = chacha20poly1305::XChaCha20Poly1305::new_from_slice(&kx)
+        .map_err(|_| Error::Crypto("Invalid key".into()))?
+        .decrypt(&xnonce(nonce).into(), Payload { msg: &inner, aad })
+        .map_err(|_| Error::Crypto("Decryption failed".into()));
+    secure_zero(&mut kx);
+    pt
+}
+
+/// Cascade ek yükü: iki etiket.
+pub const CASCADE_OVERHEAD: usize = 2 * TAG_LEN;
+
+fn xnonce(nonce: &[u8; NONCE_LEN]) -> [u8; 24] {
+    let mut x = [0u8; 24];
+    x[..8].copy_from_slice(b"KAOTIKv8");
+    x[8..20].copy_from_slice(nonce);
+    x
+}
+
+/// Seçilen sürüme göre AEAD: v8+ cascade, öncesi yalnız AES-256-GCM.
+pub fn seal(
+    cascade: bool,
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+    pt: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    if cascade {
+        cascade_encrypt(key, nonce, pt, aad)
+    } else {
+        aes_gcm_encrypt_aad(key, nonce, pt, aad)
+    }
+}
+
+pub fn open(
+    cascade: bool,
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+    ct: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    if cascade {
+        cascade_decrypt(key, nonce, ct, aad)
+    } else {
+        aes_gcm_decrypt_aad(key, nonce, ct, aad)
+    }
+}
+
 /// STREAM yapısı (Hoang-Reyhanitabar-Rogaway-Vizár): prefix(7) || sayaç(4, BE) || son_blok(1).
 /// Son blok bayrağı sayesinde kesme (truncation) ve blok yer değiştirme saldırıları tespit edilir.
 pub fn stream_nonce(prefix: &[u8; 7], counter: u32, last: bool) -> [u8; NONCE_LEN] {
@@ -225,5 +314,28 @@ pub fn nonce_for_chunk(base_nonce: &[u8; NONCE_LEN], chunk_index: u32) -> [u8; N
 pub fn secure_zero(buf: &mut [u8]) {
     for b in buf {
         unsafe { write_volatile(b, 0u8) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cascade_roundtrip_and_each_layer_authenticates() {
+        let key = [9u8; KEY_LEN];
+        let nonce = [1u8; NONCE_LEN];
+        let ct = cascade_encrypt(&key, &nonce, b"secret", b"aad").unwrap();
+        assert_eq!(ct.len(), 6 + CASCADE_OVERHEAD);
+        assert_eq!(
+            cascade_decrypt(&key, &nonce, &ct, b"aad").unwrap(),
+            b"secret"
+        );
+        assert!(cascade_decrypt(&key, &nonce, &ct, b"aaX").is_err());
+        assert!(cascade_decrypt(&[8u8; KEY_LEN], &nonce, &ct, b"aad").is_err());
+        // Dış AES katmanı soyulsa bile iç XChaCha katmanı ayrı anahtarla şifreli kalır.
+        let ka = subkey(&key, b"kaotik-v8-aes256gcm").unwrap();
+        let inner = aes_gcm_decrypt_aad(&ka, &nonce, &ct, b"aad").unwrap();
+        assert!(!inner.windows(6).any(|w| w == b"secret"));
     }
 }

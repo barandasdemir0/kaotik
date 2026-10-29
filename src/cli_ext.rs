@@ -979,8 +979,8 @@ pub fn plausible_create(
     decoy_password: &str,
     hidden_password: &str,
 ) -> Result<Vec<u8>, String> {
-    kaotik::validate_password(decoy_password).map_err(e2s)?;
-    kaotik::validate_password(hidden_password).map_err(e2s)?;
+    kaotik::validate_new_password(decoy_password).map_err(e2s)?;
+    kaotik::validate_new_password(hidden_password).map_err(e2s)?;
     if crypto::ct_eq(decoy_password.as_bytes(), hidden_password.as_bytes()) {
         return Err("Decoy and hidden passwords must differ".into());
     }
@@ -1021,8 +1021,9 @@ pub fn plausible_open(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
-    const PW: &str = "TestPassword123!@#";
-    const PW2: &str = "HiddenPassword456$%^";
+    const PW: &str = "Kx7#mQv2!Lr9$Wz4";
+    const LEGACY_PW: &str = "TestPassword123!@#";
+    const PW2: &str = "Hq3$vNw8!Tz6#Mp1";
 
     #[test]
     fn chaff_roundtrip_uniform_packets_and_wrong_password() {
@@ -1103,18 +1104,18 @@ mod tests {
     fn legacy_v1_layers_still_open() {
         let plain: &[u8] = include_bytes!("../tests/fixtures/plain.txt");
         let chaff: &[u8] = include_bytes!("../tests/fixtures/v1_chaff.bin");
-        assert_eq!(chaff_unpack(chaff, PW).unwrap(), plain);
+        assert_eq!(chaff_unpack(chaff, LEGACY_PW).unwrap(), plain);
         let pdn: &[u8] = include_bytes!("../tests/fixtures/v1_plausible.bin");
-        assert_eq!(plausible_open(pdn, PW).unwrap(), plain);
+        assert_eq!(plausible_open(pdn, LEGACY_PW).unwrap(), plain);
         assert_eq!(
             plausible_open(pdn, "DecoyPassword456$%^").unwrap(),
             b"decoy text\n"
         );
         let stego: &[u8] = include_bytes!("../tests/fixtures/v1_stego.bin");
-        assert_eq!(stego_extract(stego, PW).unwrap(), plain);
+        assert_eq!(stego_extract(stego, LEGACY_PW).unwrap(), plain);
         // Eski CLI zinciri: polymorphic → entropy → canary → dead-man → AES v4.
         let layered: &[u8] = include_bytes!("../tests/fixtures/v1_layers.kaos");
-        let ctx = derive_context_password(PW, None, None, None);
+        let ctx = derive_context_password(LEGACY_PW, None, None, None);
         let b = polymorphic_unwrap(layered, &ctx).unwrap();
         let b = entropy_poison_unwrap(&b, &ctx).unwrap();
         let b = quantum_canary_unwrap(&b, &ctx).unwrap();

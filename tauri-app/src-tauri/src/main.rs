@@ -12,14 +12,17 @@ fn normalize_mode(mode: &str) -> Result<&str, String> {
     }
 }
 
+fn same_file(a: &str, b: &str) -> bool {
+    a == b || std::fs::canonicalize(a).ok().is_some_and(|x| std::fs::canonicalize(b).ok() == Some(x))
+}
+
 /// Çıktıyı önce geçici dosyaya yazar, başarılıysa yerine taşır: hata veya aynı yol seçimi veri kaybettirmez.
 fn write_atomically(
     input_path: &str,
     output_path: &str,
     run: impl FnOnce(File, File) -> kaotik::Result<()>,
 ) -> Result<(), String> {
-    let same = std::fs::canonicalize(input_path).ok().is_some_and(|i| std::fs::canonicalize(output_path).ok() == Some(i));
-    if same {
+    if same_file(input_path, output_path) {
         return Err("Output path must differ from input path".to_string());
     }
     let reader = File::open(input_path).map_err(|e| e.to_string())?;
@@ -62,6 +65,9 @@ fn encrypt_file(
         "aes" => kaotik::encrypt_aes(reader, writer, &pwd),
         "kyber" => {
             let key_path = key_path.ok_or_else(|| kaotik::Error::Format("Kyber mode requires key_path".into()))?;
+            if [&input_path, &output_path].iter().any(|p| same_file(p, &key_path)) {
+                return Err(kaotik::Error::Format("Key path must differ from input/output".into()));
+            }
             let mut key_out = File::create(&key_path)?;
             kaotik::encrypt_kyber(reader, writer, &pwd, &mut key_out)
         }

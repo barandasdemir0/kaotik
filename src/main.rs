@@ -39,6 +39,9 @@ enum Commands {
         /// Alıcının açık anahtar dosyası (--mode recipient; parola gerekmez).
         #[arg(long)]
         recipient: Option<String>,
+        /// Alıcı modunda dosyayı kendi gizli anahtarınızla imzalayın (parola gerekir).
+        #[arg(long)]
+        sign_key: Option<String>,
         #[arg(long)]
         gps: Option<String>,
         #[arg(long)]
@@ -68,6 +71,9 @@ enum Commands {
         mode: String,
         #[arg(long)]
         key_file: Option<String>,
+        /// Alıcı modunda göndericinin açık anahtarı: imza zorunlu olur ve doğrulanır.
+        #[arg(long)]
+        sender: Option<String>,
         #[arg(long)]
         gps: Option<String>,
         #[arg(long)]
@@ -206,6 +212,33 @@ fn get_password(env_pass: Option<String>, arg_pass: Option<String>) -> kaotik::R
     Ok(pwd)
 }
 
+/// Çıktıyı geçici dosyaya akıtır, yalnızca başarıda yerine taşır ("-" ise başarıda stdout'a yazar).
+fn write_output(
+    output: &str,
+    run: impl FnOnce(&mut dyn Write) -> kaotik::Result<()>,
+) -> kaotik::Result<()> {
+    if output == "-" {
+        let mut buf = Vec::new();
+        run(&mut buf)?;
+        return Ok(io::stdout().write_all(&buf)?);
+    }
+    let tmp = format!("{}.kaotik-tmp", output);
+    let r = File::create(&tmp)
+        .map_err(kaotik::Error::from)
+        .and_then(|f| {
+            let mut w = io::BufWriter::new(f);
+            run(&mut w)?;
+            Ok(w.flush()?)
+        });
+    match r {
+        Ok(()) => Ok(std::fs::rename(&tmp, output)?),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("Error: {}", e);
@@ -225,6 +258,7 @@ fn run() -> kaotik::Result<()> {
             mode,
             key_out,
             recipient,
+            sign_key,
             gps,
             time_slot,
             mutating,
@@ -252,22 +286,33 @@ fn run() -> kaotik::Result<()> {
                         "--mode recipient requires --recipient <public key>".into(),
                     )
                 })?;
+                let pub_bytes = std::fs::read(&path)?;
+                eprintln!(
+                    "Recipient fingerprint: {} (alıcıyla başka bir kanaldan doğrulayın)",
+                    kaotik::public_key_fingerprint(&pub_bytes)
+                );
+                let signer = match &sign_key {
+                    Some(k) => {
+                        let mut pwd = get_password(std::env::var(PASSWORD_ENV).ok(), password)?;
+                        let seed = kaotik::unlock_secret_key(&pwd, &mut File::open(k)?);
+                        pwd.zeroize();
+                        Some(seed?)
+                    }
+                    None => None,
+                };
                 let reader: Box<dyn Read> = if input == "-" {
                     Box::new(io::stdin())
                 } else {
                     Box::new(File::open(&input)?)
                 };
-                let mut buf = Vec::new();
-                encrypt_to_recipient(
-                    io::BufReader::new(reader),
-                    &mut buf,
-                    &mut File::open(&path)?,
-                )?;
-                return if output == "-" {
-                    Ok(io::stdout().write_all(&buf)?)
-                } else {
-                    Ok(std::fs::write(&output, buf)?)
-                };
+                return write_output(&output, |w| {
+                    encrypt_to_recipient(
+                        io::BufReader::new(reader),
+                        w,
+                        &mut io::Cursor::new(&pub_bytes),
+                        signer.as_deref(),
+                    )
+                });
             }
             let env_pass = std::env::var(PASSWORD_ENV).ok();
             let mut pwd = get_password(env_pass, password)?;
@@ -352,6 +397,7 @@ fn run() -> kaotik::Result<()> {
             password,
             mode,
             key_file,
+            sender,
             gps,
             time_slot,
             mutating,
@@ -363,6 +409,49 @@ fn run() -> kaotik::Result<()> {
         } => {
             let env_pass = std::env::var(PASSWORD_ENV).ok();
             let mut pwd = get_password(env_pass, password)?;
+            if mode.eq_ignore_ascii_case("recipient") {
+                // Alıcı modunda parola yalnızca gizli anahtarı korur; bağlam katmanları uygulanmaz.
+                let key_path = key_file.ok_or_else(|| {
+                    kaotik::Error::Format("Recipient mode requires --key-file".into())
+                })?;
+                let sender_bytes = sender.as_deref().map(std::fs::read).transpose()?;
+                if let Some(b) = &sender_bytes {
+                    eprintln!("Sender fingerprint: {}", kaotik::public_key_fingerprint(b));
+                }
+                let reader: Box<dyn Read> = if input == "-" {
+                    Box::new(io::stdin())
+                } else {
+                    Box::new(File::open(&input)?)
+                };
+                let mut status = None;
+                let r = write_output(&output, |w| {
+                    status = Some(decrypt_from_recipient(
+                        io::BufReader::new(reader),
+                        w,
+                        &pwd,
+                        &mut File::open(&key_path)?,
+                        sender_bytes
+                            .as_ref()
+                            .map(io::Cursor::new)
+                            .as_mut()
+                            .map(|c| c as &mut dyn Read),
+                    )?);
+                    Ok(())
+                });
+                pwd.zeroize();
+                r?;
+                eprintln!(
+                    "{}",
+                    match status {
+                        Some(kaotik::SignatureStatus::Verified) =>
+                            "Signature: VERIFIED (ML-DSA-65 + Ed25519)",
+                        Some(kaotik::SignatureStatus::NotChecked) =>
+                            "Signature: present but NOT checked (pass --sender)",
+                        _ => "Signature: none (sender not authenticated)",
+                    }
+                );
+                return Ok(());
+            }
             let no_layers = !(honey || mutating || polymorphic || entropy_poison || quantum_canary);
             // Katmansız aes dosyası: belleğe almadan akışla çöz (büyük dosyalar). Çıktı geçici dosyadan taşınır.
             if no_layers && mode.eq_ignore_ascii_case("aes") && input != "-" && output != "-" {
@@ -449,18 +538,6 @@ fn run() -> kaotik::Result<()> {
                         let mut key_read = File::open(&path)?;
                         decrypt_kyber(&mut reader, &mut out_buf, &ctx_pwd, &mut key_read)?;
                     }
-                    "recipient" => {
-                        let path = key_file.as_deref().ok_or_else(|| {
-                            kaotik::Error::Format("Recipient mode requires --key-file".into())
-                        })?;
-                        // Alıcı modunda parola gizli anahtarı korur; bağlam katmanları uygulanmaz.
-                        decrypt_from_recipient(
-                            &mut reader,
-                            &mut out_buf,
-                            &pwd,
-                            &mut File::open(path)?,
-                        )?;
-                    }
                     _ => {
                         return Err(kaotik::Error::Format(
                             "Invalid mode. Use kaotik, aes, kyber, or recipient.".into(),
@@ -507,6 +584,10 @@ fn run() -> kaotik::Result<()> {
             eprintln!(
                 "Public key: {} (paylaşılabilir). Secret key: {} (gizli tutun, yedekleyin).",
                 public_out, secret_out
+            );
+            eprintln!(
+                "Fingerprint: {}",
+                kaotik::public_key_fingerprint(&std::fs::read(&public_out)?)
             );
             Ok(())
         }

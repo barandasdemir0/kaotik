@@ -17,8 +17,12 @@ pub const VERSION_KAOTIK_PADDED: u16 = 5;
 pub const VERSION_AEAD_BOUND: u16 = 6;
 /// v7: post-kuantum hibrit KEM (ML-KEM-768 + X25519) — kyber ve alıcı modları.
 pub const VERSION_PQ_HYBRID: u16 = 7;
+/// v8: zincirleme AEAD (XChaCha20-Poly1305 + AES-256-GCM) tüm modlarda; kyber STREAM ile.
+pub const VERSION_CASCADE: u16 = 8;
 /// Alıcı açık anahtar dosyası sihirli baytları.
 pub const PUBKEY_MAGIC: &[u8; 8] = b"KAOSPUB1";
+/// v2 açık anahtar: KEM + imza doğrulama anahtarı.
+pub const PUBKEY2_MAGIC: &[u8; 8] = b"KAOSPUB2";
 /// Başlık uzunluğu: magic(4) + version(2) + format(1).
 pub const HEADER_LEN: usize = 7;
 

@@ -31,7 +31,7 @@ Program **komut satırı (CLI)** çalışır: `kaotik <komut> <seçenekler>`.
 
 1. **kaotik** — Parola + 8 katman kaotik (XOR, permütasyon, S-box) + AES-256-GCM. Tek parola yeter; büyük dosyalar için bellekte tutulur (max 256 MiB).
 2. **aes** — Sadece parola + AES-256-GCM, 64 KiB bloklarla (streaming). Büyük dosyalar için uygun.
-3. **kyber** — NIST Kyber-768 (kuantum direnci). Şifrelerken bir **anahtar dosyası** (örn. `secret.key`) oluşturulur; bu dosya parola ile korunur. Çözerken hem parola hem bu anahtar dosyası gerekir.
+3. **kyber** — ML-KEM-768 (NIST FIPS 203) + X25519 hibrit (kuantum direnci). Şifrelerken bir **anahtar dosyası** (örn. `secret.key`) oluşturulur; bu dosya parola ile korunur. Çözerken hem parola hem bu anahtar dosyası gerekir.
 
 Parola: En az 16 karakter, büyük harf + rakam + özel karakter. İstersen `KAOTIK_PASSWORD` ortam değişkeni ile verebilirsin (komut satırında görünmez).
 
@@ -217,13 +217,15 @@ npm run tauri build
 
 ---
 
-## Güvenlik modeli (v6/v7)
+## Güvenlik modeli (v8)
 
 - **Anahtar türetme:** Parola yalnızca **Argon2id (256 MiB, t=4)** ile işlenir; alt anahtarlar HKDF-SHA256 ile ayrılır. Ek katmanların (chaff, stego, dead-man, entropy, polymorphic, canary, plausible) hiçbiri parolayı hızlı hash ile kullanmaz.
 - **Bütünlük:** Başlık, sürüm, KDF ve nonce AES-256-GCM AAD'ye bağlıdır (sürüm/KDF düşürme reddedilir). AES ve alıcı modları STREAM yapısını kullanır: kesme, sıra değiştirme ve sona ekleme tespit edilir.
-- **Kyber (v7, hibrit post-kuantum):** Anahtar kapsülleme ML-KEM-768 (NIST FIPS 203) + X25519 birleşimidir (X-Wing tarzı); dosya anahtarı ayrıca Argon2id(parola) ile birleştirilir. Açmak için kafes problemi, eliptik eğri ve parola birlikte aşılmalıdır. Anahtar dosyasını şifreli dosyadan **ayrı** saklayın. Eski v2/v6 Kyber dosyaları okunmaya devam eder.
-- **Alıcı modu:** `kaotik keygen --public-out ben.pub --secret-out ben.sec` ile anahtar çifti üretilir. Gönderici `--mode recipient --recipient ben.pub` ile parola bilmeden şifreler; yalnızca gizli anahtar + parola sahibi açar. Dosya anahtarı 256-bit rastgele bir KEM sırrından gelir; parola yalnızca gizli anahtar dosyasını korur.
-- **Parola:** `kaotik passgen` 9 kelimelik (≈99 bit) rastgele parola cümlesi üretir (BIP39 listesi). İnsanların uydurduğu parolalar genellikle 30–40 bit civarındadır; hiçbir kod bunu telafi edemez.
+- **Zincirleme şifreleme (v8, tüm modlar):** Her blok önce XChaCha20-Poly1305, sonra AES-256-GCM ile, HKDF'den türetilen bağımsız anahtarlarla şifrelenir. İki farklı tasarım (ARX akış şifresi + blok şifre): biri kırılsa diğeri gizliliği ve bütünlüğü korur.
+- **Kaotik motor (v8):** Kaotik moddaki imza katmanı. Anahtardan türetilen parametrelerle sinüs-zorlamalı Lorenz sistemi (dx/dt = σ(y−x) + ε·sin z, dy/dt = x(ρ−z) − y, dz/dt = xy − βz) 4. dereceden Runge–Kutta ile sayısal olarak integre edilir. sin ve exp Taylor–Maclaurin serisiyle, tüm platformlarda bit-bit aynı sonuç için Q23.40 sabit noktalı tam sayı aritmetiğiyle hesaplanır (kayan nokta yok). Çıktı anahtar akışı + anahtarlı S-box. Not: dosyanın kriptografik güvenliği bu katmana değil dıştaki zincirleme AEAD'ye dayanır; kaotik motor ek bir karıştırma katmanıdır.
+- **Kyber (v8, hibrit post-kuantum):** Anahtar kapsülleme ML-KEM-768 (NIST FIPS 203) + X25519 (X-Wing tarzı); dosya anahtarı ayrıca Argon2id(parola) ile birleştirilir; STREAM ile işlenir (dosya belleğe alınmaz). Anahtar dosyasını şifreli dosyadan **ayrı** saklayın.
+- **Alıcı modu + imza:** `kaotik keygen` anahtar çifti üretir ve **parmak izini** gösterir; parmak izini karşı tarafla başka bir kanaldan (yüz yüze, telefon) karşılaştırın. Gönderici `--mode recipient --recipient bob.pub --sign-key alice.sec` ile şifreler ve **ML-DSA-65 (FIPS 204) + Ed25519** ile imzalar; alıcı `--sender alice.pub` ile çözer. İmza tüm dosyayı kapsar; yanlış gönderici veya değişmiş dosya reddedilir ve çıktı yazılmaz.
+- **Parola:** Yeni dosyalarda tahmin edilebilir kalıplar (yıl, tekrar, ardışık dizi, klavye sırası, yaygın kelime) reddedilir. `kaotik passgen` 9 kelimelik (≈99 bit) parola cümlesi üretir (BIP39 listesi). Eski dosyalar eski kurallarla açılmaya devam eder.
 - **Plausible deniability:** Konteyner sihirli bayt/uzunluk içermez; iki eşit boyutlu, rastgeleden ayırt edilemeyen yuvadan oluşur.
 - **Dead-man switch:** Son tarih AAD ile doğrulanır. Çevrimdışı zaman kilidi yerel saate dayanır; parola sahibinin saati geri alması engellenemez.
 - **Fuzzing:** `fuzz/` altındaki cargo-fuzz hedefleri tüm ayrıştırıcıları ve çözme yollarını bozuk girdiyle dener (CI'da her push'ta kısa tur).

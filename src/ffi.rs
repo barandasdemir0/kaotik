@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn small_output_buffer_is_refused_not_overflowed() {
-        let pw = b"TestPassword123!@#";
+        let pw = b"Kx7#mQv2!Lr9$Wz4";
         let plain = [7u8; 100];
         let mut out = [0u8; 64];
         let mut len = out.len();

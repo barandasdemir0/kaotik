@@ -4,12 +4,14 @@
 //! **kyber** (NIST ML-KEM Kyber-768 + parola ile korunan anahtar dosyası).
 
 pub mod chaotic;
+pub mod chaotic2;
 pub mod crypto;
 pub mod error;
 pub mod format;
 pub mod hybrid_kem;
 pub mod nist_kyber;
 pub mod password;
+pub mod sign;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -21,7 +23,7 @@ pub use format::{
     FORMAT_AES, FORMAT_KAOTIK, FORMAT_KYBER, VERSION_AEAD_BOUND, VERSION_AES_CHUNKED,
     VERSION_CURRENT, VERSION_KAOTIK_PADDED, VERSION_LEGACY,
 };
-pub use password::{generate_passphrase, validate_password};
+pub use password::{generate_passphrase, validate_new_password, validate_password};
 
 use std::io::{Read, Write};
 use zeroize::Zeroizing;
@@ -104,10 +106,11 @@ fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize> {
     Ok(filled)
 }
 
-/// Kaotik mod: parola + 8 katman kaotik (XOR, permütasyon, S-box) + AES-256-GCM. Tek seferde belleğe alır; büyük dosya için AES modu kullanın.
-/// v6: Argon2id (256 MiB) ana anahtar → HKDF alt anahtarları; başlık ve metaveri AAD ile doğrulanır.
+/// Kaotik mod (v8): parola → Argon2id → HKDF alt anahtarları; rastgele dolgu → kaotik motor
+/// (RK4 ile integre edilen zorlanmış Lorenz sistemi, Taylor serisiyle sin) → XChaCha20-Poly1305 + AES-256-GCM.
+/// Tek seferde belleğe alır; büyük dosya için AES modu kullanın.
 pub fn encrypt_kaotik<R: Read, W: Write>(reader: R, mut writer: W, password: &str) -> Result<()> {
-    validate_password(password)?;
+    validate_new_password(password)?;
     let salt = crypto::gen_salt()?;
     let nonce = crypto::gen_nonce()?;
     let kdf = crypto::KDF_DEFAULT;
@@ -122,13 +125,14 @@ pub fn encrypt_kaotik<R: Read, W: Write>(reader: R, mut writer: W, password: &st
         )));
     }
     let mut master = crypto::derive_key(password, &salt, kdf)?;
-    let (mut key, chaos_key) = kaotik_v6_keys(&master)?;
+    let mut key = crypto::subkey(&master, b"kaotik-v6-aead")?;
+    let chaos_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-v8-chaos")?);
     crypto::secure_zero(&mut master);
     let mut padded = apply_random_padding(&plaintext)?;
-    chaotic::apply_chaotic_xor_layers(&mut padded, &chaos_key, &salt)?;
-    let header = format::header_bytes(format::VERSION_AEAD_BOUND, format::FORMAT_KAOTIK);
+    chaotic2::apply(&mut padded, &chaos_key, &salt);
+    let header = format::header_bytes(format::VERSION_CASCADE, format::FORMAT_KAOTIK);
     let aad = [&header[..], &salt[..], &[kdf], &nonce[..]].concat();
-    let ciphertext_with_tag = crypto::aes_gcm_encrypt_aad(&key, &nonce, &padded, &aad)?;
+    let ciphertext_with_tag = crypto::cascade_encrypt(&key, &nonce, &padded, &aad)?;
     crypto::secure_zero(plaintext.as_mut_slice());
     crypto::secure_zero(&mut key);
     writer.write_all(&header)?;
@@ -136,7 +140,7 @@ pub fn encrypt_kaotik<R: Read, W: Write>(reader: R, mut writer: W, password: &st
     Ok(())
 }
 
-/// Kaotik mod dosyasını parola ile çözer (v2–v6).
+/// Kaotik mod dosyasını parola ile çözer (v2–v8).
 pub fn decrypt_kaotik<R: Read, W: Write>(
     mut reader: R,
     mut writer: W,
@@ -155,7 +159,23 @@ pub fn decrypt_kaotik<R: Read, W: Write>(
             return Err(Error::Format("Kaotik ciphertext too large".into()));
         }
         let mut master = crypto::derive_key(password, &salt, kdf)?;
-        let mut padded_plain = if version >= format::VERSION_AEAD_BOUND {
+        let mut padded_plain = if version >= format::VERSION_CASCADE {
+            let mut key = crypto::subkey(&master, b"kaotik-v6-aead")?;
+            let chaos_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-v8-chaos")?);
+            crypto::secure_zero(&mut master);
+            let aad = [
+                &format::header_bytes(version, format_byte)[..],
+                &salt[..],
+                &[kdf],
+                &nonce[..],
+            ]
+            .concat();
+            let dec = crypto::cascade_decrypt(&key, &nonce, &ciphertext_with_tag, &aad);
+            crypto::secure_zero(&mut key);
+            let mut p = Zeroizing::new(dec?);
+            chaotic2::reverse(&mut p, &chaos_key, &salt);
+            p
+        } else if version >= format::VERSION_AEAD_BOUND {
             let (mut key, chaos_key) = kaotik_v6_keys(&master)?;
             crypto::secure_zero(&mut master);
             let header = format::header_bytes(version, format_byte);
@@ -216,7 +236,7 @@ pub fn encrypt_kyber<R: Read, W: Write>(
     password: &str,
     secret_key_out: &mut dyn Write,
 ) -> Result<()> {
-    validate_password(password)?;
+    validate_new_password(password)?;
     let (sk_seed, pk) = hybrid_kem::generate_keypair()?;
     let (kem_ct, ss) = hybrid_kem::encapsulate(&pk)?;
     let salt = crypto::gen_salt()?;
@@ -224,31 +244,23 @@ pub fn encrypt_kyber<R: Read, W: Write>(
     let mut pw_key = crypto::derive_key(password, &salt, kdf)?;
     let mut aes_key = kyber_hybrid_key(&ss[..], &pw_key, &salt, &kem_ct)?;
     crypto::secure_zero(&mut pw_key);
-    let nonce = crypto::gen_nonce()?;
-    let mut plaintext = Zeroizing::new(Vec::new());
-    reader.read_to_end(&mut plaintext)?;
-    let header = format::header_bytes(format::VERSION_PQ_HYBRID, format::FORMAT_KYBER);
+    let mut prefix = [0u8; 7];
+    crypto::random_bytes(&mut prefix)?;
+    let header = format::header_bytes(format::VERSION_CASCADE, format::FORMAT_KYBER);
+    // v8: başlık | kem_len | kem_ct | salt | kdf | nonce öneki | STREAM blokları (dosya belleğe alınmaz).
     let aad = [
         &header[..],
         &(kem_ct.len() as u32).to_le_bytes(),
         &kem_ct,
         &salt[..],
         &[kdf],
-        &nonce[..],
+        &prefix[..],
     ]
     .concat();
-    let ciphertext_with_tag = crypto::aes_gcm_encrypt_aad(&aes_key, &nonce, &plaintext, &aad)?;
-    crypto::secure_zero(plaintext.as_mut_slice());
+    writer.write_all(&aad)?;
+    let r = stream_encrypt(&mut reader, &mut writer, &aes_key, &prefix, &aad, true);
     crypto::secure_zero(&mut aes_key);
-    writer.write_all(&header)?;
-    format::write_kyber_payload_v6(
-        &mut writer,
-        &kem_ct,
-        &salt,
-        kdf,
-        &nonce,
-        &ciphertext_with_tag,
-    )?;
+    r?;
     let key_salt = crypto::gen_salt()?;
     let key_nonce = crypto::gen_nonce()?;
     let mut key_file_key = crypto::derive_key(password, &key_salt, kdf)?;
@@ -272,6 +284,7 @@ fn stream_encrypt<R: Read, W: Write>(
     key: &[u8; crypto::KEY_LEN],
     prefix: &[u8; 7],
     aad: &[u8],
+    cascade: bool,
 ) -> Result<()> {
     let mut cur = Zeroizing::new(vec![0u8; AES_CHUNK_SIZE]);
     let mut next = Zeroizing::new(vec![0u8; AES_CHUNK_SIZE]);
@@ -285,7 +298,7 @@ fn stream_encrypt<R: Read, W: Write>(
         };
         let last = next_len == 0;
         let nonce = crypto::stream_nonce(prefix, counter, last);
-        let ct = crypto::aes_gcm_encrypt_aad(key, &nonce, &cur[..cur_len], aad)?;
+        let ct = crypto::seal(cascade, key, &nonce, &cur[..cur_len], aad)?;
         writer.write_all(&[last as u8])?;
         writer.write_all(&(ct.len() as u32).to_le_bytes())?;
         writer.write_all(&ct)?;
@@ -307,6 +320,8 @@ fn stream_decrypt<R: Read, W: Write>(
     key: &[u8; crypto::KEY_LEN],
     prefix: &[u8; 7],
     aad: &[u8],
+    cascade: bool,
+    check_eof: bool,
 ) -> Result<()> {
     let mut counter: u32 = 0;
     loop {
@@ -320,7 +335,7 @@ fn stream_decrypt<R: Read, W: Write>(
             _ => return Err(Error::Crypto("Decryption failed".into())),
         };
         let len = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
-        if len > AES_CHUNK_SIZE + crypto::TAG_LEN {
+        if len > AES_CHUNK_SIZE + crypto::CASCADE_OVERHEAD {
             return Err(Error::Format("Chunk size exceeds limit".into()));
         }
         let mut ct = vec![0u8; len];
@@ -328,11 +343,11 @@ fn stream_decrypt<R: Read, W: Write>(
             .read_exact(&mut ct)
             .map_err(|_| Error::Crypto("Decryption failed: stream truncated".into()))?;
         let nonce = crypto::stream_nonce(prefix, counter, last);
-        let pt = Zeroizing::new(crypto::aes_gcm_decrypt_aad(key, &nonce, &ct, aad)?);
+        let pt = Zeroizing::new(crypto::open(cascade, key, &nonce, &ct, aad)?);
         writer.write_all(&pt)?;
         if last {
             let mut extra = [0u8; 1];
-            if reader.read(&mut extra)? != 0 {
+            if check_eof && reader.read(&mut extra)? != 0 {
                 return Err(Error::Crypto("Decryption failed: trailing data".into()));
             }
             return Ok(());
@@ -346,7 +361,7 @@ fn stream_decrypt<R: Read, W: Write>(
 /// AES modu: AES-256-GCM STREAM, 64 KiB bloklar. Her blok sayaç + son-blok bayrağı içeren nonce ile şifrelenir;
 /// başlık AAD'ye bağlıdır. Kesme, yeniden sıralama ve blok değiştirme tespit edilir.
 pub fn encrypt_aes<R: Read, W: Write>(mut reader: R, mut writer: W, password: &str) -> Result<()> {
-    validate_password(password)?;
+    validate_new_password(password)?;
     let salt = crypto::gen_salt()?;
     let mut prefix = [0u8; 7];
     crypto::random_bytes(&mut prefix)?;
@@ -354,12 +369,12 @@ pub fn encrypt_aes<R: Read, W: Write>(mut reader: R, mut writer: W, password: &s
     let mut master = crypto::derive_key(password, &salt, kdf)?;
     let mut key = crypto::subkey(&master, b"kaotik-v6-aes-stream")?;
     crypto::secure_zero(&mut master);
-    let header = format::header_bytes(format::VERSION_AEAD_BOUND, format::FORMAT_AES);
+    let header = format::header_bytes(format::VERSION_CASCADE, format::FORMAT_AES);
     let aad = [&header[..], &salt[..], &[kdf], &prefix[..]].concat();
     writer.write_all(&header)?;
     format::write_aes_stream_start(&mut writer, &salt, kdf, &prefix)?;
 
-    let result = stream_encrypt(&mut reader, &mut writer, &key, &prefix, &aad);
+    let result = stream_encrypt(&mut reader, &mut writer, &key, &prefix, &aad, true);
     crypto::secure_zero(&mut key);
     result
 }
@@ -380,7 +395,15 @@ pub fn decrypt_aes<R: Read, W: Write>(mut reader: R, mut writer: W, password: &s
             crypto::secure_zero(&mut master);
             let header = format::header_bytes(version, format_byte);
             let aad = [&header[..], &salt[..], &[kdf], &prefix[..]].concat();
-            let r = stream_decrypt(&mut reader, &mut writer, &key, &prefix, &aad);
+            let r = stream_decrypt(
+                &mut reader,
+                &mut writer,
+                &key,
+                &prefix,
+                &aad,
+                version >= format::VERSION_CASCADE,
+                true,
+            );
             crypto::secure_zero(&mut key);
             r?;
         } else if version >= format::VERSION_AES_CHUNKED {
@@ -444,6 +467,37 @@ pub fn decrypt_kyber<R: Read, W: Write>(
         if format_byte != format::FORMAT_KYBER {
             return Err(Error::Format("Not a Kyber format file".into()));
         }
+        if version >= format::VERSION_CASCADE {
+            let mut len = [0u8; 4];
+            reader.read_exact(&mut len)?;
+            if u32::from_le_bytes(len) as usize != hybrid_kem::CIPHERTEXT_LEN {
+                return Err(Error::Format("Invalid Kyber ciphertext length".into()));
+            }
+            let mut kem_ct = vec![0u8; hybrid_kem::CIPHERTEXT_LEN];
+            reader.read_exact(&mut kem_ct)?;
+            let (salt, kdf, prefix) = format::read_aes_stream_start(&mut reader)?;
+            let seed: Zeroizing<[u8; hybrid_kem::SECRET_LEN]> = Zeroizing::new(
+                sk_bytes[..]
+                    .try_into()
+                    .map_err(|_| Error::Crypto("Decryption failed".into()))?,
+            );
+            let ss = hybrid_kem::decapsulate(&seed, &kem_ct)?;
+            let mut pw_key = crypto::derive_key(password, &salt, kdf)?;
+            let mut key = kyber_hybrid_key(&ss[..], &pw_key, &salt, &kem_ct)?;
+            crypto::secure_zero(&mut pw_key);
+            let aad = [
+                &format::header_bytes(version, format_byte)[..],
+                &len,
+                &kem_ct,
+                &salt[..],
+                &[kdf],
+                &prefix[..],
+            ]
+            .concat();
+            let r = stream_decrypt(&mut reader, &mut writer, &key, &prefix, &aad, true, true);
+            crypto::secure_zero(&mut key);
+            return r;
+        }
         let mut aes_key: [u8; 32];
         let (nonce, ciphertext_with_tag, aad) = if version >= format::VERSION_AEAD_BOUND {
             let (kem_ct, salt, kdf, nonce, ct) = format::read_kyber_payload_v6(&mut reader)?;
@@ -498,16 +552,18 @@ pub fn decrypt_kyber<R: Read, W: Write>(
     result
 }
 
-/// Alıcı anahtar çifti üretir. Açık anahtar paylaşılır; gizli anahtar parola (Argon2id) ile şifrelenir.
+/// Alıcı anahtar çifti üretir. Açık anahtar (şifreleme + imza doğrulama) paylaşılır;
+/// gizli tohum parola (Argon2id) ile şifrelenir.
 pub fn generate_recipient_keys(
     password: &str,
     public_out: &mut dyn Write,
     secret_out: &mut dyn Write,
 ) -> Result<()> {
-    validate_password(password)?;
-    let (seed, pk) = hybrid_kem::generate_keypair()?;
-    public_out.write_all(format::PUBKEY_MAGIC)?;
-    public_out.write_all(&pk)?;
+    validate_new_password(password)?;
+    let (seed, kem_pk) = hybrid_kem::generate_keypair()?;
+    public_out.write_all(format::PUBKEY2_MAGIC)?;
+    public_out.write_all(&kem_pk)?;
+    public_out.write_all(&sign::public_key(&seed))?;
     let salt = crypto::gen_salt()?;
     let nonce = crypto::gen_nonce()?;
     let kdf = crypto::KDF_DEFAULT;
@@ -517,16 +573,50 @@ pub fn generate_recipient_keys(
     format::write_encrypted_secret_key(secret_out, 3, &salt, kdf, &nonce, &enc?)
 }
 
-fn read_public_key(r: &mut dyn Read) -> Result<Vec<u8>> {
+/// Gizli anahtar dosyasını parola ile açar (32 baytlık kimlik tohumu).
+pub fn unlock_secret_key(
+    password: &str,
+    secret_key: &mut dyn Read,
+) -> Result<Zeroizing<[u8; hybrid_kem::SECRET_LEN]>> {
+    validate_password(password)?;
+    let (_, salt, kdf, nonce, enc) = format::read_encrypted_secret_key(secret_key)?;
+    let mut key = crypto::derive_key(password, &salt, kdf)?;
+    let seed = crypto::aes_gcm_decrypt_aad(&key, &nonce, &enc, format::PUBKEY_MAGIC);
+    crypto::secure_zero(&mut key);
+    let seed = Zeroizing::new(seed?);
+    Ok(Zeroizing::new(
+        seed[..]
+            .try_into()
+            .map_err(|_| Error::Crypto("Decryption failed".into()))?,
+    ))
+}
+
+/// Açık anahtar dosyası: (KEM açık anahtarı, imza açık anahtarı — v1 dosyalarda yok).
+fn read_public_key(r: &mut dyn Read) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+    let full = format::PUBKEY2_MAGIC.len() + hybrid_kem::PUBLIC_LEN + sign::PUBLIC_LEN;
     let mut buf = Vec::new();
-    r.take((format::PUBKEY_MAGIC.len() + hybrid_kem::PUBLIC_LEN + 1) as u64)
-        .read_to_end(&mut buf)?;
-    if buf.len() != format::PUBKEY_MAGIC.len() + hybrid_kem::PUBLIC_LEN
-        || !buf.starts_with(format::PUBKEY_MAGIC)
-    {
-        return Err(Error::Format("Invalid public key file".into()));
+    r.take(full as u64 + 1).read_to_end(&mut buf)?;
+    let m = format::PUBKEY_MAGIC.len();
+    if buf.len() == full && buf.starts_with(format::PUBKEY2_MAGIC) {
+        let sig = buf.split_off(m + hybrid_kem::PUBLIC_LEN);
+        return Ok((buf.split_off(m), Some(sig)));
     }
-    Ok(buf.split_off(format::PUBKEY_MAGIC.len()))
+    if buf.len() == m + hybrid_kem::PUBLIC_LEN && buf.starts_with(format::PUBKEY_MAGIC) {
+        return Ok((buf.split_off(m), None));
+    }
+    Err(Error::Format("Invalid public key file".into()))
+}
+
+/// Açık anahtar parmak izi: SHA-256'nın ilk 16 baytı, 4'lü gruplar. Anahtarı aldığınız kişiyle
+/// başka bir kanaldan (yüz yüze, telefon) karşılaştırın: ortadaki adam saldırısını bu yakalar.
+pub fn public_key_fingerprint(public_key_file: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(public_key_file);
+    d[..16]
+        .chunks(2)
+        .map(|c| format!("{:02X}{:02X}", c[0], c[1]))
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 fn recipient_stream_key(ss: &[u8; 32], aad: &[u8]) -> Result<[u8; crypto::KEY_LEN]> {
@@ -541,44 +631,96 @@ fn recipient_stream_key(ss: &[u8; 32], aad: &[u8]) -> Result<[u8; crypto::KEY_LE
     Ok(k)
 }
 
+/// Yazılan/okunan her baytı SHA-512 ile özetler (imza tüm dosyayı kapsar).
+struct Hashing<T> {
+    inner: T,
+    h: sha2::Sha512,
+}
+
+impl<T: Write> Write for Hashing<T> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest;
+        let n = self.inner.write(b)?;
+        self.h.update(&b[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<T: Read> Read for Hashing<T> {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        use sha2::Digest;
+        let n = self.inner.read(b)?;
+        self.h.update(&b[..n]);
+        Ok(n)
+    }
+}
+
+/// İmza durumu (alıcı modu çözme sonucu).
+#[derive(Debug, PartialEq, Eq)]
+pub enum SignatureStatus {
+    /// Dosya imzasız.
+    Unsigned,
+    /// İmza verilen gönderici anahtarıyla doğrulandı (ML-DSA-65 + Ed25519).
+    Verified,
+    /// Dosya imzalı ama doğrulamak için gönderici anahtarı verilmedi.
+    NotChecked,
+}
+
 /// Alıcı modu: alıcının açık anahtarına (ML-KEM-768 + X25519) şifreler; gönderici parola bilmez.
-/// Düzen: başlık | KEM şifreli metni | nonce öneki(7) | STREAM blokları.
+/// `signer` verilirse dosyanın tamamı göndericinin kimliğiyle (ML-DSA-65 + Ed25519) imzalanır.
+/// Düzen v8: başlık | KEM şifreli metni | nonce öneki(7) | bayrak(1) | STREAM blokları | [imza].
 pub fn encrypt_to_recipient<R: Read, W: Write>(
     mut reader: R,
-    mut writer: W,
+    writer: W,
     public_key: &mut dyn Read,
+    signer: Option<&[u8; hybrid_kem::SECRET_LEN]>,
 ) -> Result<()> {
-    let pk = read_public_key(public_key)?;
+    let (pk, _) = read_public_key(public_key)?;
     let (kem_ct, ss) = hybrid_kem::encapsulate(&pk)?;
     let mut prefix = [0u8; 7];
     crypto::random_bytes(&mut prefix)?;
-    let header = format::header_bytes(format::VERSION_PQ_HYBRID, format::FORMAT_RECIPIENT);
-    let aad = [&header[..], &kem_ct, &prefix[..]].concat();
+    let header = format::header_bytes(format::VERSION_CASCADE, format::FORMAT_RECIPIENT);
+    let aad = [&header[..], &kem_ct, &prefix[..], &[signer.is_some() as u8]].concat();
     let mut key = recipient_stream_key(&ss, &aad)?;
-    writer.write_all(&aad)?;
-    let r = stream_encrypt(&mut reader, &mut writer, &key, &prefix, &aad);
+    let mut w = Hashing {
+        inner: writer,
+        h: sha2::Digest::new(),
+    };
+    let r = w
+        .write_all(&aad)
+        .map_err(Error::from)
+        .and_then(|_| stream_encrypt(&mut reader, &mut w, &key, &prefix, &aad, true));
     crypto::secure_zero(&mut key);
-    r
+    r?;
+    if let Some(seed) = signer {
+        let Hashing { mut inner, h } = w;
+        let d: [u8; 64] = sha2::Digest::finalize(h).into();
+        inner.write_all(&sign::sign(seed, &d))?;
+    }
+    Ok(())
 }
 
-/// Alıcı modu dosyasını gizli anahtar dosyası + parola ile çözer.
+/// Alıcı modu dosyasını gizli anahtar + parola ile çözer. `sender` (göndericinin açık anahtarı)
+/// verilirse imza zorunludur ve doğrulanır. Not: düz metin akışla yazılır; hata dönerse çıktıyı atın.
 pub fn decrypt_from_recipient<R: Read, W: Write>(
     mut reader: R,
     mut writer: W,
     password: &str,
     secret_key: &mut dyn Read,
-) -> Result<()> {
-    validate_password(password)?;
-    let (_, salt, kdf, nonce, enc) = format::read_encrypted_secret_key(secret_key)?;
-    let mut key = crypto::derive_key(password, &salt, kdf)?;
-    let seed = crypto::aes_gcm_decrypt_aad(&key, &nonce, &enc, format::PUBKEY_MAGIC);
-    crypto::secure_zero(&mut key);
-    let seed = Zeroizing::new(seed?);
-    let seed: Zeroizing<[u8; hybrid_kem::SECRET_LEN]> = Zeroizing::new(
-        seed[..]
-            .try_into()
-            .map_err(|_| Error::Crypto("Decryption failed".into()))?,
-    );
+    sender: Option<&mut dyn Read>,
+) -> Result<SignatureStatus> {
+    let seed = unlock_secret_key(password, secret_key)?;
+    let sender_pk = match sender {
+        Some(r) => Some(
+            read_public_key(r)?
+                .1
+                .ok_or_else(|| Error::Format("Sender key has no signing key (v1)".into()))?,
+        ),
+        None => None,
+    };
     let (version, format_byte) = format::read_header(&mut reader)?;
     if format_byte != format::FORMAT_RECIPIENT {
         return Err(Error::Format("Not a recipient format file".into()));
@@ -587,17 +729,52 @@ pub fn decrypt_from_recipient<R: Read, W: Write>(
     reader.read_exact(&mut kem_ct)?;
     let mut prefix = [0u8; 7];
     reader.read_exact(&mut prefix)?;
-    let ss = hybrid_kem::decapsulate(&seed, &kem_ct)?;
+    let header = format::header_bytes(version, format_byte);
+    let cascade = version >= format::VERSION_CASCADE;
+    let mut flags = [0u8; 1];
+    if cascade {
+        reader.read_exact(&mut flags)?;
+        if flags[0] > 1 {
+            return Err(Error::Format("Unknown recipient flags".into()));
+        }
+    }
+    let signed = flags[0] == 1;
     let aad = [
-        &format::header_bytes(version, format_byte)[..],
+        &header[..],
         &kem_ct,
         &prefix[..],
+        if cascade { &flags[..] } else { &[] },
     ]
     .concat();
-    let mut stream_key = recipient_stream_key(&ss, &aad)?;
-    let r = stream_decrypt(&mut reader, &mut writer, &stream_key, &prefix, &aad);
-    crypto::secure_zero(&mut stream_key);
-    r
+    if sender_pk.is_some() && !signed {
+        return Err(Error::Crypto("File is not signed".into()));
+    }
+    let ss = hybrid_kem::decapsulate(&seed, &kem_ct)?;
+    let mut key = recipient_stream_key(&ss, &aad)?;
+    let mut hr = Hashing {
+        inner: &mut reader,
+        h: sha2::Digest::new(),
+    };
+    sha2::Digest::update(&mut hr.h, &aad);
+    let r = stream_decrypt(&mut hr, &mut writer, &key, &prefix, &aad, cascade, !signed);
+    crypto::secure_zero(&mut key);
+    r?;
+    if !signed {
+        return Ok(SignatureStatus::Unsigned);
+    }
+    let d: [u8; 64] = sha2::Digest::finalize(hr.h).into();
+    let mut sig = vec![0u8; sign::SIGNATURE_LEN];
+    reader
+        .read_exact(&mut sig)
+        .map_err(|_| Error::Crypto("Signature missing".into()))?;
+    if reader.read(&mut [0u8; 1])? != 0 {
+        return Err(Error::Crypto("Decryption failed: trailing data".into()));
+    }
+    match sender_pk {
+        Some(pk) if sign::verify(&pk, &d, &sig) => Ok(SignatureStatus::Verified),
+        Some(_) => Err(Error::Crypto("Signature verification failed".into())),
+        None => Ok(SignatureStatus::NotChecked),
+    }
 }
 
 /// Dosya yapısını doğrular (header + payload öneki). Parola veya içeriği çözmez.
@@ -624,7 +801,7 @@ pub fn verify_file<R: Read>(mut reader: R) -> Result<()> {
                         return Err(Error::Format("Invalid stream frame".into()));
                     }
                     let len = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
-                    if len > AES_CHUNK_SIZE + crypto::TAG_LEN {
+                    if len > AES_CHUNK_SIZE + crypto::CASCADE_OVERHEAD {
                         return Err(Error::Format("Chunk size exceeds limit".into()));
                     }
                     std::io::copy(&mut (&mut reader).take(len as u64), &mut std::io::sink())?;
@@ -657,7 +834,10 @@ pub fn verify_file<R: Read>(mut reader: R) -> Result<()> {
             }
         }
         format::FORMAT_KYBER => {
-            if version >= format::VERSION_AEAD_BOUND {
+            if version >= format::VERSION_CASCADE {
+                let mut skip = vec![0u8; 4 + hybrid_kem::CIPHERTEXT_LEN + format::SALT_LEN + 1 + 7];
+                reader.read_exact(&mut skip)?;
+            } else if version >= format::VERSION_AEAD_BOUND {
                 let _ = format::read_kyber_payload_v6(&mut reader)?;
             } else {
                 let (_, _, _) = format::read_kyber_payload(&mut reader)?;
@@ -679,7 +859,9 @@ mod tests {
     use crate::crypto::SALT_LEN;
     use std::io::Cursor;
 
-    const TEST_PASSWORD: &str = "TestPassword123!@#";
+    const TEST_PASSWORD: &str = "Kx7#mQv2!Lr9$Wz4";
+    /// Eski fixture'ların üretildiği parola (çözme kuralı gevşek kalır).
+    const LEGACY_PASSWORD: &str = "TestPassword123!@#";
 
     #[test]
     fn test_password_validation() {
@@ -856,7 +1038,7 @@ mod tests {
         let mut cur = Cursor::new(&cipher);
         let (version, fmt) = read_header(&mut cur).unwrap();
         assert_eq!(fmt, FORMAT_KAOTIK);
-        assert_eq!(version, format::VERSION_AEAD_BOUND);
+        assert_eq!(version, format::VERSION_CASCADE);
     }
 
     #[test]
@@ -931,7 +1113,7 @@ mod tests {
         ] {
             let plain: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
             let c = aes_cipher(&plain);
-            assert_eq!(&c[4..6], &format::VERSION_AEAD_BOUND.to_le_bytes());
+            assert_eq!(&c[4..6], &format::VERSION_CASCADE.to_le_bytes());
             let mut d = Vec::new();
             decrypt_aes(Cursor::new(&c), &mut d, TEST_PASSWORD).unwrap();
             assert_eq!(d, plain, "len {}", len);
@@ -1024,11 +1206,11 @@ mod tests {
     fn test_legacy_fixtures_still_decrypt() {
         use sha2::{Digest, Sha256};
         // Fixture'lar eski CLI ile üretildi: CLI parolayı bağlam parolasına çevirir (cli_ext::derive_context_password).
-        let hex: String = Sha256::digest(TEST_PASSWORD.as_bytes())
+        let hex: String = Sha256::digest(LEGACY_PASSWORD.as_bytes())
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect();
-        let ctx = format!("{}|CTX:{}A1!", TEST_PASSWORD, &hex[..16]);
+        let ctx = format!("{}|CTX:{}A1!", LEGACY_PASSWORD, &hex[..16]);
         let plain: &[u8] = include_bytes!("../tests/fixtures/plain.txt");
         let mut out = Vec::new();
         decrypt_kaotik(
@@ -1056,6 +1238,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, plain);
+        // v6/v7 (önceki commit): kaotik v6, aes v6 STREAM, kyber v7 hibrit KEM, alıcı v7.
+        let mut out = Vec::new();
+        decrypt_kaotik(
+            Cursor::new(&include_bytes!("../tests/fixtures/v6_kaotik.kaos")[..]),
+            &mut out,
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(out, plain);
+        let mut out = Vec::new();
+        decrypt_aes(
+            Cursor::new(&include_bytes!("../tests/fixtures/v6_aes.kaos")[..]),
+            &mut out,
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(out, plain);
+        let mut out = Vec::new();
+        let mut key = Cursor::new(&include_bytes!("../tests/fixtures/v7_kyber.key")[..]);
+        decrypt_kyber(
+            Cursor::new(&include_bytes!("../tests/fixtures/v7_kyber.kaos")[..]),
+            &mut out,
+            &ctx,
+            &mut key,
+        )
+        .unwrap();
+        assert_eq!(out, plain);
+        let mut out = Vec::new();
+        let mut sec = Cursor::new(&include_bytes!("../tests/fixtures/v7_recipient.sec")[..]);
+        let st = decrypt_from_recipient(
+            Cursor::new(&include_bytes!("../tests/fixtures/v7_recipient.kaos")[..]),
+            &mut out,
+            LEGACY_PASSWORD,
+            &mut sec,
+            None,
+        )
+        .unwrap();
+        assert_eq!((st, out.as_slice()), (SignatureStatus::Unsigned, plain));
+        // v1 açık anahtar dosyası (KAOSPUB1) hâlâ şifrelemede kabul edilir.
+        let mut c = Vec::new();
+        encrypt_to_recipient(
+            Cursor::new(b"x"),
+            &mut c,
+            &mut Cursor::new(&include_bytes!("../tests/fixtures/v7_recipient.pub")[..]),
+            None,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1063,7 +1292,7 @@ mod tests {
         let mut c = Vec::new();
         let mut key = Vec::new();
         encrypt_kyber(Cursor::new(b"v7"), &mut c, TEST_PASSWORD, &mut key).unwrap();
-        assert_eq!(&c[4..6], &format::VERSION_PQ_HYBRID.to_le_bytes());
+        assert_eq!(&c[4..6], &format::VERSION_CASCADE.to_le_bytes());
         let ct_len = u32::from_le_bytes(c[7..11].try_into().unwrap()) as usize;
         assert_eq!(ct_len, hybrid_kem::CIPHERTEXT_LEN);
         let mut d = Vec::new();
@@ -1083,47 +1312,85 @@ mod tests {
         generate_recipient_keys(TEST_PASSWORD, &mut pubk, &mut sec).unwrap();
         let plain: Vec<u8> = (0..(AES_CHUNK_SIZE * 2 + 5)).map(|i| i as u8).collect();
         let mut c = Vec::new();
-        encrypt_to_recipient(Cursor::new(&plain), &mut c, &mut Cursor::new(&pubk)).unwrap();
+        encrypt_to_recipient(Cursor::new(&plain), &mut c, &mut Cursor::new(&pubk), None).unwrap();
+        assert_eq!(&c[4..6], &format::VERSION_CASCADE.to_le_bytes());
         assert!(verify_file(Cursor::new(&c)).is_ok());
-        let mut d = Vec::new();
-        decrypt_from_recipient(
-            Cursor::new(&c),
-            &mut d,
-            TEST_PASSWORD,
-            &mut Cursor::new(&sec),
-        )
-        .unwrap();
-        assert_eq!(d, plain);
-        assert!(decrypt_from_recipient(
-            Cursor::new(&c),
-            &mut Vec::new(),
-            "OtherPassword456!@#",
-            &mut Cursor::new(&sec)
-        )
-        .is_err());
+        let dec = |c: &[u8], pw: &str, sec: &[u8], sender: Option<&[u8]>| {
+            let mut out = Vec::new();
+            let mut s = sender.map(Cursor::new);
+            decrypt_from_recipient(
+                Cursor::new(c),
+                &mut out,
+                pw,
+                &mut Cursor::new(sec),
+                s.as_mut().map(|c| c as &mut dyn Read),
+            )
+            .map(|st| (st, out))
+        };
+        let (st, d) = dec(&c, TEST_PASSWORD, &sec, None).unwrap();
+        assert_eq!((st, d), (SignatureStatus::Unsigned, plain.clone()));
+        assert!(dec(&c, "OtherPassword456!@#", &sec, None).is_err());
         let (mut pub2, mut sec2) = (Vec::new(), Vec::new());
         generate_recipient_keys(TEST_PASSWORD, &mut pub2, &mut sec2).unwrap();
-        assert!(decrypt_from_recipient(
-            Cursor::new(&c),
-            &mut Vec::new(),
-            TEST_PASSWORD,
-            &mut Cursor::new(&sec2)
-        )
-        .is_err());
+        assert!(dec(&c, TEST_PASSWORD, &sec2, None).is_err());
         let mut bad = c.clone();
         bad[20] ^= 1; // KEM şifreli metni
-        assert!(decrypt_from_recipient(
-            Cursor::new(&bad),
-            &mut Vec::new(),
-            TEST_PASSWORD,
-            &mut Cursor::new(&sec)
-        )
-        .is_err());
+        assert!(dec(&bad, TEST_PASSWORD, &sec, None).is_err());
         assert!(encrypt_to_recipient(
             Cursor::new(b"x"),
             &mut Vec::new(),
-            &mut Cursor::new(&pubk[..100])
+            &mut Cursor::new(&pubk[..100]),
+            None
         )
         .is_err());
+        // İmzasız dosya, gönderici anahtarı istenince reddedilir.
+        assert!(dec(&c, TEST_PASSWORD, &sec, Some(&pub2)).is_err());
+    }
+
+    #[test]
+    fn test_recipient_signed_by_sender() {
+        let (mut alice_pub, mut alice_sec) = (Vec::new(), Vec::new());
+        let (mut bob_pub, mut bob_sec) = (Vec::new(), Vec::new());
+        generate_recipient_keys(TEST_PASSWORD, &mut alice_pub, &mut alice_sec).unwrap();
+        generate_recipient_keys(TEST_PASSWORD, &mut bob_pub, &mut bob_sec).unwrap();
+        let alice = unlock_secret_key(TEST_PASSWORD, &mut Cursor::new(&alice_sec)).unwrap();
+        let mut c = Vec::new();
+        encrypt_to_recipient(
+            Cursor::new(b"signed msg"),
+            &mut c,
+            &mut Cursor::new(&bob_pub),
+            Some(&alice),
+        )
+        .unwrap();
+        let run = |c: &[u8], sender: Option<&[u8]>| {
+            let mut out = Vec::new();
+            let mut s = sender.map(Cursor::new);
+            decrypt_from_recipient(
+                Cursor::new(c),
+                &mut out,
+                TEST_PASSWORD,
+                &mut Cursor::new(&bob_sec),
+                s.as_mut().map(|c| c as &mut dyn Read),
+            )
+            .map(|st| (st, out))
+        };
+        assert_eq!(
+            run(&c, Some(&alice_pub)).unwrap(),
+            (SignatureStatus::Verified, b"signed msg".to_vec())
+        );
+        assert_eq!(run(&c, None).unwrap().0, SignatureStatus::NotChecked);
+        // Yanlış gönderici (Bob kendini Alice sanıyor) → reddedilir.
+        assert!(run(&c, Some(&bob_pub)).is_err());
+        // İmzanın son baytı bozulursa reddedilir; dosya kesilirse reddedilir.
+        let mut bad = c.clone();
+        let n = bad.len();
+        bad[n - 1] ^= 1;
+        assert!(run(&bad, Some(&alice_pub)).is_err());
+        assert!(run(&c[..c.len() - 10], Some(&alice_pub)).is_err());
+        assert!(!public_key_fingerprint(&alice_pub).is_empty());
+        assert_ne!(
+            public_key_fingerprint(&alice_pub),
+            public_key_fingerprint(&bob_pub)
+        );
     }
 }
