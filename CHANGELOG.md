@@ -20,6 +20,8 @@ Kaotik artık her uygulamaya gömülebilen, kuantum sonrası **hibrit** bir krip
 ### Düzeltmeler
 - FFI'deki tampon taşması kapatıldı (çıktı tamponlarını artık kütüphane ayırıyor).
 - Bozuk çevrimdışı (vendor) derleme onarıldı; `vendor_hashes.txt` taşınabilir biçimde.
+- `ctutils` 0.4.7'ye yükseltildi (RUSTSEC-2026-0385: sabit zamanlı olmayan maske/karşılaştırma).
+- Not: eski Kyber-768 dosya modunun kullandığı `pqcrypto-*` paketlerinin bakımı bırakıldı (PQClean arşivleniyor); yeni API RustCrypto `ml-kem` kullanır.
 
 ### Kalite
 - Fuzz hedefleri, dudect zamanlama kontrolü (`examples/ct_check.rs`).
