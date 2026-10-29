@@ -1,0 +1,4 @@
+{
+  "test_nistkat.py::test_nistkat[aarch64 implementation of kyber768]": true,
+  "test_nistkat.py::test_nistkat[aarch64 implementation of kyber1024]": true
+}

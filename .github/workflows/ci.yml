@@ -4,37 +4,80 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
-    branches: [ main, master ]
 
 jobs:
-  build-and-test:
-    if: ${{ false }}
+  test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test (offline, vendored)
+        run: cargo test --release --offline --features ffi
+      - name: Build C library
+        run: cargo build --release --offline --features ffi --lib
+      - name: Python binding smoke test
+        if: runner.os == 'Linux'
+        run: cd bindings/python && python3 test_kaotik.py
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+  vendor-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify vendored sources against vendor_hashes.txt
+        run: scripts/vendor_hashes.sh --check
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - name: Build wasm library
+        run: cargo build --release --offline --lib --target wasm32-unknown-unknown --features wasm
 
-      - name: Check format
-        run: cargo fmt --all -- --check
+  tauri:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System libraries for Tauri 1
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.0-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Use crates.io (Tauri deps are not vendored)
+        run: rm .cargo/config.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build frontend (distDir)
+        run: cd tauri-app && npm ci && npm run build
+      - name: Check desktop app
+        run: cd tauri-app/src-tauri && cargo check
 
-      - name: Build
-        run: cargo build --release
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use crates.io (cargo-audit is not vendored)
+        run: rm .cargo/config.toml
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Test (Kaotik focus)
-        run: cargo test --release test_kaotik_
-
-      - name: Test (Kaotik determinism)
-        run: cargo test --release test_kaotik_layers_deterministic_with_fixed_salt
-
-      - name: Test
-        run: cargo test --release
-
-      - name: Clippy
-        run: cargo clippy --release -- -D warnings
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Use crates.io (fuzz deps are not vendored)
+        run: rm .cargo/config.toml
+      - run: cargo install cargo-fuzz --locked
+      - name: Fuzz each target for 60s
+        run: |
+          cd fuzz
+          for t in $(cargo fuzz list); do cargo fuzz run "$t" -- -max_total_time=60; done

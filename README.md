@@ -1,5 +1,7 @@
 # Kaotik — Rust crypto library and CLI
 
+> **Yeni (uygulamalara gömmek için):** `kaotik::hybrid` (X25519+ML-KEM-1024, Ed25519+ML-DSA-87, XChaCha20-Poly1305), `kaotik::ratchet` (kuantum sonrası, başlığı şifreli Double Ratchet), `kaotik::group` (grup sohbeti), `kaotik::hashsig` (SLH-DSA), `kaotik::stream` (büyük dosyalar), `kaotik::keystore` (anahtar saklama, OS anahtar zinciri), `kaotik::passhash` (Argon2id). Bağlamalar: C (`include/kaotik.h`), Python (`bindings/python`), WebAssembly (`bindings/js`). Ayrıntılar: [GUVENLIK_MODELI.md](GUVENLIK_MODELI.md).
+
 Platform-independent encryption. **Kyber:** NIST FIPS 203 ML-KEM (Kyber-768), kuantum direnci. **Kaotik modu:** 8 katman hibrit kaotik + permütasyon + S-box + AES-256-GCM. **AES modu:** yalnizca AES-256-GCM (NIST standart), yani kaotik katman bu modda bilincli olarak kapali. Paroladan anahtar: **Argon2id** (yeni dosyalar) veya PBKDF2 (eski dosyalar, geri uyumlu). Windows, Linux, macOS.
 
 Kisa ozet: Kaotiklik bu projede vardir ve ana moddur; sadece `--mode aes` secilirse kaotik katman kullanilmaz.

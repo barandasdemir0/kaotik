@@ -7,11 +7,21 @@ pub mod chaotic;
 pub mod crypto;
 pub mod error;
 pub mod format;
+pub mod group;
+pub mod hashsig;
+pub mod hybrid;
+pub mod keystore;
+pub mod passhash;
+pub mod ratchet;
+pub mod stream;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod nist_kyber;
 pub mod password;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 pub use error::{Error, Result};
 pub use password::validate_password;
@@ -24,8 +34,20 @@ pub use format::{
 };
 
 use std::io::{Read, Write};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+/// wasm32-unknown-unknown'da saat/uyku yok; zamanlama tamponu orada devre dışı.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy)]
+struct Instant;
+#[cfg(target_arch = "wasm32")]
+impl Instant {
+    fn now() -> Self {
+        Instant
+    }
+}
 use zeroize::Zeroizing;
 
 /// AES streaming: blok boyutu (64 KiB); büyük dosyalar bellekte tutulmaz.
@@ -45,9 +67,16 @@ const MIN_DECRYPT_DURATION: Duration = Duration::from_millis(120);
 
 #[inline]
 fn enforce_min_decrypt_duration(start: Instant) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (start, MIN_DECRYPT_DURATION);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     let elapsed = start.elapsed();
     if elapsed < MIN_DECRYPT_DURATION {
-        thread::sleep(MIN_DECRYPT_DURATION - elapsed);
+        std::thread::sleep(MIN_DECRYPT_DURATION - elapsed);
+    }
     }
 }
 
@@ -145,6 +174,7 @@ pub fn decrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password:
 }
 
 /// Kyber mod: NIST ML-KEM Kyber-768. Paylaşılan gizlilik AES anahtarı olur; gizli anahtar `secret_key_out`'a parola ile şifrelenmiş yazılır.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn encrypt_kyber<R: Read, W: Write>(
     mut reader: R,
     mut writer: W,
@@ -263,6 +293,7 @@ pub fn decrypt_aes<R: Read, W: Write>(mut reader: R, mut writer: W, password: &s
 }
 
 /// Kyber mod dosyasını çözer. Gizli anahtar `key_file_reader`'dan parola ile açılır; KEM decapsulate sonrası AES ile çözülür.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn decrypt_kyber<R: Read, W: Write>(
     mut reader: R,
     mut writer: W,
