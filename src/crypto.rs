@@ -76,7 +76,8 @@ pub fn subkey(master: &[u8; KEY_LEN], info: &[u8]) -> Result<[u8; KEY_LEN]> {
 /// HMAC-SHA256.
 pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     use hmac::{Hmac, Mac};
-    let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac =
+        <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
     for p in parts {
         mac.update(p);
     }
@@ -95,11 +96,16 @@ pub fn hkdf_expand(prk: &[u8], info: &[u8], length: usize, salt: Option<&[u8]>) 
     use sha2::Sha256;
     let hk = Hkdf::<Sha256>::new(salt, prk);
     let mut okm = vec![0u8; length];
-    hk.expand(info, &mut okm).map_err(|_| Error::Crypto("HKDF expand failed".into()))?;
+    hk.expand(info, &mut okm)
+        .map_err(|_| Error::Crypto("HKDF expand failed".into()))?;
     Ok(okm)
 }
 
-pub fn aes_gcm_encrypt(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN], plaintext: &[u8]) -> Result<Vec<u8>> {
+pub fn aes_gcm_encrypt(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
     use aes_gcm::{
         aead::{Aead, KeyInit},
         Aes256Gcm,
@@ -111,7 +117,11 @@ pub fn aes_gcm_encrypt(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN], plaintext: 
     Ok(ciphertext)
 }
 
-pub fn aes_gcm_decrypt(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN], ciphertext: &[u8]) -> Result<Vec<u8>> {
+pub fn aes_gcm_decrypt(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>> {
     use aes_gcm::{
         aead::{Aead, KeyInit},
         Aes256Gcm,
@@ -124,25 +134,47 @@ pub fn aes_gcm_decrypt(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN], ciphertext:
 }
 
 /// AES-256-GCM, ek doğrulanmış veri (AAD) ile: başlık/metaveri değiştirilirse çözme başarısız olur.
-pub fn aes_gcm_encrypt_aad(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+pub fn aes_gcm_encrypt_aad(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
     use aes_gcm::{
         aead::{Aead, KeyInit, Payload},
         Aes256Gcm,
     };
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::Crypto("Invalid key".into()))?;
     cipher
-        .encrypt(nonce.into(), Payload { msg: plaintext, aad })
+        .encrypt(
+            nonce.into(),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|e| Error::Crypto(e.to_string()))
 }
 
-pub fn aes_gcm_decrypt_aad(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+pub fn aes_gcm_decrypt_aad(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
     use aes_gcm::{
         aead::{Aead, KeyInit, Payload},
         Aes256Gcm,
     };
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::Crypto("Invalid key".into()))?;
     cipher
-        .decrypt(nonce.into(), Payload { msg: ciphertext, aad })
+        .decrypt(
+            nonce.into(),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| Error::Crypto("Decryption failed".into()))
 }
 

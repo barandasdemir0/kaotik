@@ -72,10 +72,7 @@ pub fn write_kaotik_payload<W: Write>(
 }
 
 /// version >= 3 ise kdf byte okunur, yoksa kdf = 0 (PBKDF2).
-pub fn read_kaotik_payload<R: Read>(
-    r: &mut R,
-    version: u16,
-) -> Result<KaotikPayload> {
+pub fn read_kaotik_payload<R: Read>(r: &mut R, version: u16) -> Result<KaotikPayload> {
     let mut salt = [0u8; SALT_LEN];
     r.read_exact(&mut salt)?;
     let kdf = if version >= VERSION_CURRENT {
@@ -109,9 +106,7 @@ pub fn write_kyber_payload<W: Write>(
 /// Kyber-768 KEM ciphertext sabit 1088 byte; üst sınır sahtecilik/DoS önlemi.
 const MAX_KEM_CT_LEN: usize = 2048;
 
-pub fn read_kyber_payload<R: Read>(
-    r: &mut R,
-) -> Result<(Vec<u8>, [u8; NONCE_LEN], Vec<u8>)> {
+pub fn read_kyber_payload<R: Read>(r: &mut R) -> Result<(Vec<u8>, [u8; NONCE_LEN], Vec<u8>)> {
     let mut ct_len_buf = [0u8; 4];
     r.read_exact(&mut ct_len_buf)?;
     let ct_len = u32::from_le_bytes(ct_len_buf) as usize;
@@ -168,7 +163,12 @@ pub fn read_kyber_payload_v6<R: Read>(r: &mut R) -> Result<KyberPayloadV6> {
 }
 
 /// v6 AES STREAM başlangıcı: salt(32) + kdf(1) + nonce_prefix(7).
-pub fn write_aes_stream_start<W: Write>(w: &mut W, salt: &[u8; SALT_LEN], kdf: u8, prefix: &[u8; 7]) -> Result<()> {
+pub fn write_aes_stream_start<W: Write>(
+    w: &mut W,
+    salt: &[u8; SALT_LEN],
+    kdf: u8,
+    prefix: &[u8; 7],
+) -> Result<()> {
     w.write_all(salt)?;
     w.write_all(&[kdf])?;
     w.write_all(prefix)?;
@@ -198,9 +198,7 @@ pub fn write_aes_chunked_start<W: Write>(
     Ok(())
 }
 
-pub fn read_aes_chunked_start<R: Read>(
-    r: &mut R,
-) -> Result<([u8; SALT_LEN], u8, [u8; NONCE_LEN])> {
+pub fn read_aes_chunked_start<R: Read>(r: &mut R) -> Result<([u8; SALT_LEN], u8, [u8; NONCE_LEN])> {
     let mut salt = [0u8; SALT_LEN];
     r.read_exact(&mut salt)?;
     let mut kdf = [0u8; 1];
@@ -233,9 +231,7 @@ pub fn write_encrypted_secret_key<W: Write + ?Sized>(
 }
 
 /// version_byte: 3 = yeni (salt,kdf,nonce,ct), değilse eski (ilk okunan byte tuzun parçası: salt 31 okumak gerekir).
-pub fn read_encrypted_secret_key<R: Read + ?Sized>(
-    r: &mut R,
-) -> Result<EncryptedSecretKeyPayload> {
+pub fn read_encrypted_secret_key<R: Read + ?Sized>(r: &mut R) -> Result<EncryptedSecretKeyPayload> {
     let mut first = [0u8; 1];
     r.read_exact(&mut first)?;
     let version = first[0];

@@ -94,7 +94,7 @@ enum Commands {
         #[arg(short, long)]
         output: String,
         #[arg(short, long)]
-        password: String,
+        password: Option<String>,
         #[arg(long, default_value_t = 64)]
         fake_packets: u32,
     },
@@ -105,7 +105,7 @@ enum Commands {
         #[arg(short, long)]
         output: String,
         #[arg(short, long)]
-        password: String,
+        password: Option<String>,
     },
     /// Şifreli veriyi taşıyıcı dosyanın bitlerine gömer.
     StegoEmbed {
@@ -116,7 +116,7 @@ enum Commands {
         #[arg(short, long)]
         output: String,
         #[arg(short, long)]
-        password: String,
+        password: Option<String>,
     },
     /// Taşıyıcı dosyadan gömülü veriyi çıkarır.
     StegoExtract {
@@ -125,7 +125,7 @@ enum Commands {
         #[arg(short, long)]
         output: String,
         #[arg(short, long)]
-        password: String,
+        password: Option<String>,
     },
     /// Dead-man switch zarfı uygular.
     SealSwitch {
@@ -172,7 +172,7 @@ enum Commands {
         #[arg(short, long)]
         output: String,
         #[arg(short, long)]
-        password: String,
+        password: Option<String>,
     },
 }
 
@@ -180,8 +180,12 @@ fn get_password(env_pass: Option<String>, arg_pass: Option<String>) -> kaotik::R
     if let Some(pwd) = env_pass.filter(|s| !s.is_empty()) {
         return Ok(pwd);
     }
-    let pwd = arg_pass.ok_or_else(|| kaotik::Error::Format("Missing --password or KAOTIK_PASSWORD".into()))?;
-    eprintln!("Warning: --password on command line may be visible. Prefer {}.", PASSWORD_ENV);
+    let pwd = arg_pass
+        .ok_or_else(|| kaotik::Error::Format("Missing --password or KAOTIK_PASSWORD".into()))?;
+    eprintln!(
+        "Warning: --password on command line may be visible. Prefer {}.",
+        PASSWORD_ENV
+    );
     Ok(pwd)
 }
 
@@ -238,7 +242,9 @@ fn run() -> kaotik::Result<()> {
                     "kaotik" => encrypt_kaotik(&mut input_reader, &mut tmp_out, &ctx_pwd)?,
                     "aes" => encrypt_aes(&mut input_reader, &mut tmp_out, &ctx_pwd)?,
                     "kyber" => {
-                        let path = key_out.ok_or_else(|| kaotik::Error::Format("Kyber requires --key-out".into()))?;
+                        let path = key_out.ok_or_else(|| {
+                            kaotik::Error::Format("Kyber requires --key-out".into())
+                        })?;
                         let mut key_file = File::create(&path)?;
                         encrypt_kyber(&mut input_reader, &mut tmp_out, &ctx_pwd, &mut key_file)?;
                     }
@@ -280,7 +286,7 @@ fn run() -> kaotik::Result<()> {
             })();
 
             if mutating && output != "-" && result.is_ok() {
-                let _ = cli_ext::update_mutation_seed(&state_dir, &output);
+                let _ = cli_ext::update_mutation_seed(&state_dir, &output, mutation_seed.as_ref());
             }
 
             pwd.zeroize();
@@ -304,8 +310,48 @@ fn run() -> kaotik::Result<()> {
         } => {
             let env_pass = std::env::var(PASSWORD_ENV).ok();
             let mut pwd = get_password(env_pass, password)?;
+            let no_layers = !(honey || mutating || polymorphic || entropy_poison || quantum_canary);
+            // Katmansız aes dosyası: belleğe almadan akışla çöz (büyük dosyalar). Çıktı geçici dosyadan taşınır.
+            if no_layers && mode.eq_ignore_ascii_case("aes") && input != "-" && output != "-" {
+                let mut f = File::open(&input)?;
+                let mut magic = [0u8; 4];
+                let is_plain = f.read_exact(&mut magic).is_ok() && &magic == kaotik::format::MAGIC;
+                if is_plain {
+                    let mut ctx_pwd = cli_ext::derive_context_password(
+                        &pwd,
+                        gps.as_deref(),
+                        time_slot.as_deref(),
+                        None,
+                    );
+                    let tmp = format!("{}.kaotik-tmp", output);
+                    let r = File::create(&tmp)
+                        .map_err(kaotik::Error::from)
+                        .and_then(|w| {
+                            let reader = io::Cursor::new(magic).chain(io::BufReader::new(f));
+                            decrypt_aes(reader, io::BufWriter::new(w), &ctx_pwd)
+                        });
+                    pwd.zeroize();
+                    ctx_pwd.zeroize();
+                    return match r {
+                        Ok(()) => Ok(std::fs::rename(&tmp, &output)?),
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&tmp);
+                            Err(e)
+                        }
+                    };
+                }
+            }
+
+            let mut input_blob = Vec::new();
+            if input == "-" {
+                io::stdin().read_to_end(&mut input_blob)?;
+            } else {
+                File::open(&input)?.read_to_end(&mut input_blob)?;
+            }
+            // Dosyanın üretildiği andaki tohum günlükten bulunur; yoksa güncel tohum denenir.
             let mutation_seed = if mutating {
-                cli_ext::read_mutation_seed(&state_dir)
+                cli_ext::mutation_seed_for(&state_dir, &input_blob)
+                    .unwrap_or_else(|| cli_ext::read_mutation_seed(&state_dir))
             } else {
                 None
             };
@@ -316,30 +362,27 @@ fn run() -> kaotik::Result<()> {
                 mutation_seed.as_ref(),
             );
 
-            let mut input_blob = Vec::new();
-            if input == "-" {
-                io::stdin().read_to_end(&mut input_blob)?;
-            } else {
-                File::open(&input)?.read_to_end(&mut input_blob)?;
-            }
-
             let result = (|| -> kaotik::Result<Vec<u8>> {
-                let mut outer = input_blob.clone();
+                let mut outer = std::borrow::Cow::Borrowed(&input_blob[..]);
                 if polymorphic {
                     outer = cli_ext::polymorphic_unwrap(&outer, &ctx_pwd)
-                        .map_err(kaotik::Error::Format)?;
+                        .map_err(kaotik::Error::Format)?
+                        .into();
                 }
                 if entropy_poison {
                     outer = cli_ext::entropy_poison_unwrap(&outer, &ctx_pwd)
-                        .map_err(kaotik::Error::Format)?;
+                        .map_err(kaotik::Error::Format)?
+                        .into();
                 }
                 if quantum_canary {
                     outer = cli_ext::quantum_canary_unwrap(&outer, &ctx_pwd)
-                        .map_err(kaotik::Error::Format)?;
+                        .map_err(kaotik::Error::Format)?
+                        .into();
                 }
 
-                let unwrapped = cli_ext::deadman_unwrap(&outer, Some(&ctx_pwd), emergency_key.as_deref())
-                    .map_err(kaotik::Error::Format)?;
+                let unwrapped =
+                    cli_ext::deadman_unwrap(&outer, Some(&ctx_pwd), emergency_key.as_deref())
+                        .map_err(kaotik::Error::Format)?;
                 let mut reader = io::Cursor::new(unwrapped);
                 let mut out_buf = Vec::new();
 
@@ -347,7 +390,9 @@ fn run() -> kaotik::Result<()> {
                     "kaotik" => decrypt_kaotik(&mut reader, &mut out_buf, &ctx_pwd)?,
                     "aes" => decrypt_aes(&mut reader, &mut out_buf, &ctx_pwd)?,
                     "kyber" => {
-                        let path = key_file.ok_or_else(|| kaotik::Error::Format("Kyber requires --key-file".into()))?;
+                        let path = key_file.ok_or_else(|| {
+                            kaotik::Error::Format("Kyber requires --key-file".into())
+                        })?;
                         let mut key_read = File::open(&path)?;
                         decrypt_kyber(&mut reader, &mut out_buf, &ctx_pwd, &mut key_read)?;
                     }
@@ -397,6 +442,7 @@ fn run() -> kaotik::Result<()> {
             password,
             fake_packets,
         } => {
+            let password = get_password(std::env::var(PASSWORD_ENV).ok(), password)?;
             let payload = std::fs::read(&input)?;
             let packed = cli_ext::chaff_pack(&payload, &password, fake_packets)
                 .map_err(kaotik::Error::Format)?;
@@ -408,6 +454,7 @@ fn run() -> kaotik::Result<()> {
             output,
             password,
         } => {
+            let password = get_password(std::env::var(PASSWORD_ENV).ok(), password)?;
             let blob = std::fs::read(&input)?;
             let payload = cli_ext::chaff_unpack(&blob, &password).map_err(kaotik::Error::Format)?;
             std::fs::write(&output, payload)?;
@@ -419,6 +466,7 @@ fn run() -> kaotik::Result<()> {
             output,
             password,
         } => {
+            let password = get_password(std::env::var(PASSWORD_ENV).ok(), password)?;
             let carrier_bytes = std::fs::read(&carrier)?;
             let secret = std::fs::read(&input)?;
             let stego = cli_ext::stego_embed(&carrier_bytes, &secret, &password)
@@ -431,8 +479,10 @@ fn run() -> kaotik::Result<()> {
             output,
             password,
         } => {
+            let password = get_password(std::env::var(PASSWORD_ENV).ok(), password)?;
             let stego = std::fs::read(&input)?;
-            let payload = cli_ext::stego_extract(&stego, &password).map_err(kaotik::Error::Format)?;
+            let payload =
+                cli_ext::stego_extract(&stego, &password).map_err(kaotik::Error::Format)?;
             std::fs::write(&output, payload)?;
             Ok(())
         }
@@ -445,8 +495,9 @@ fn run() -> kaotik::Result<()> {
         } => {
             let mut pwd = get_password(std::env::var(PASSWORD_ENV).ok(), password)?;
             let blob = std::fs::read(&input)?;
-            let wrapped = cli_ext::deadman_wrap(&blob, not_after_unix, &pwd, emergency_key.as_deref())
-                .map_err(kaotik::Error::Format);
+            let wrapped =
+                cli_ext::deadman_wrap(&blob, not_after_unix, &pwd, emergency_key.as_deref())
+                    .map_err(kaotik::Error::Format);
             pwd.zeroize();
             let wrapped = wrapped?;
             std::fs::write(&output, wrapped)?;
@@ -460,8 +511,9 @@ fn run() -> kaotik::Result<()> {
         } => {
             let mut pwd = password.or_else(|| std::env::var(PASSWORD_ENV).ok());
             let blob = std::fs::read(&input)?;
-            let unwrapped = cli_ext::deadman_unwrap(&blob, pwd.as_deref(), emergency_key.as_deref())
-                .map_err(kaotik::Error::Format);
+            let unwrapped =
+                cli_ext::deadman_unwrap(&blob, pwd.as_deref(), emergency_key.as_deref())
+                    .map_err(kaotik::Error::Format);
             if let Some(p) = pwd.as_mut() {
                 p.zeroize();
             }
@@ -493,9 +545,10 @@ fn run() -> kaotik::Result<()> {
             output,
             password,
         } => {
+            let password = get_password(std::env::var(PASSWORD_ENV).ok(), password)?;
             let blob = std::fs::read(&input)?;
-            let opened = cli_ext::plausible_open(&blob, &password)
-                .map_err(kaotik::Error::Format)?;
+            let opened =
+                cli_ext::plausible_open(&blob, &password).map_err(kaotik::Error::Format)?;
             std::fs::write(&output, opened)?;
             Ok(())
         }

@@ -1,0 +1,14 @@
+[
+  "test_functest.py::test_functest[clean implementation of kyber1024]",
+  "test_functest.py::test_functest[clean implementation of kyber512]",
+  "test_functest.py::test_functest[clean implementation of kyber768]",
+  "test_functest.py::test_functest_sanitizers[clean implementation of kyber1024]",
+  "test_functest.py::test_functest_sanitizers[clean implementation of kyber512]",
+  "test_functest.py::test_functest_sanitizers[clean implementation of kyber768]",
+  "test_nistkat.py::test_nistkat[aarch64 implementation of kyber1024]",
+  "test_nistkat.py::test_nistkat[aarch64 implementation of kyber512]",
+  "test_nistkat.py::test_nistkat[aarch64 implementation of kyber768]",
+  "test_nistkat.py::test_nistkat[clean implementation of kyber1024]",
+  "test_nistkat.py::test_nistkat[clean implementation of kyber512]",
+  "test_nistkat.py::test_nistkat[clean implementation of kyber768]"
+]

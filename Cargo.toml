@@ -15,7 +15,6 @@ path = "src/main.rs"
 
 [features]
 default = []
-wasm = []   # wasm32-unknown-unknown (kaotik/aes only, no Kyber)
 ffi = []    # C FFI (no_mangle extern "C")
 
 [dependencies]

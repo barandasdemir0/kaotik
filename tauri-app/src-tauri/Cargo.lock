@@ -1789,10 +1789,12 @@ dependencies = [
  "clap",
  "getrandom 0.2.17",
  "hkdf",
+ "hmac",
  "pbkdf2",
  "pqcrypto-kyber",
  "pqcrypto-traits",
  "sha2",
+ "subtle",
  "zeroize",
 ]
 

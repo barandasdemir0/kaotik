@@ -44,7 +44,9 @@ fn lorenz_mix(x: u64, y: u64, z: u64, sigma: u64, rho: u64, beta: u64) -> (u64, 
 #[inline(always)]
 fn rossler_mix(x: u64, y: u64, z: u64, a: u64, b: u64, c: u64) -> (u64, u64, u64) {
     let nx = (x.wrapping_sub(y).wrapping_sub(z)).rotate_left((a as u32 & 31) + 1);
-    let ny = x.wrapping_add(a.wrapping_mul(y)).rotate_right((b as u32 & 31) + 1);
+    let ny = x
+        .wrapping_add(a.wrapping_mul(y))
+        .rotate_right((b as u32 & 31) + 1);
     let nz = b
         .wrapping_add(z.wrapping_mul(x.wrapping_sub(c)))
         .rotate_left((c as u32 & 31) + 1);
@@ -204,18 +206,7 @@ fn generate_hybrid_sequence(
                 .wrapping_add(x_cubic);
             let _ = splitmix64(&mut seed);
         }
-        let mut mixed = x_log
-            ^ hx
-            ^ hy
-            ^ lx
-            ^ ly
-            ^ lz
-            ^ rx
-            ^ ry
-            ^ rz
-            ^ x_tent
-            ^ x_cubic
-            ^ seed;
+        let mut mixed = x_log ^ hx ^ hy ^ lx ^ ly ^ lz ^ rx ^ ry ^ rz ^ x_tent ^ x_cubic ^ seed;
         mixed ^= mixed.rotate_left((p[0] as u32 & 31) + 1);
         mixed = splitmix64(&mut mixed);
         out.push(mixed);

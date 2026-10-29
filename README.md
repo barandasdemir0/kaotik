@@ -204,7 +204,6 @@ npm run tauri build
 
 ## WASM
 
-`wasm` feature ile (Kyber hariç) `wasm32-unknown-unknown` hedeflenebilir. Bazı bağımlılıklar WASM’de sınırlı olduğu için ayrı bir feature/alt crate ile denemeniz gerekebilir.
 
 ## Notlar ve sınırlamalar
 
