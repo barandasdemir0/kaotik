@@ -1,0 +1,13 @@
+[package]
+name = "ct-check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+kaotik = { path = ".." }
+
+[profile.release]
+debug = false

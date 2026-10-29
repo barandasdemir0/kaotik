@@ -328,9 +328,7 @@ pub fn apply_chaotic_xor_layers(data: &mut [u8], password: &str, salt: &[u8]) ->
         apply_permutation(data, &perm);
 
         let sbox = chaos_sbox(&seq, password, salt, layer, prev);
-        for byte in data.iter_mut() {
-            *byte = sbox[*byte as usize];
-        }
+        crate::chaotic2::ct_lookup(&sbox, data);
     }
     Ok(())
 }
@@ -346,9 +344,8 @@ pub fn reverse_chaotic_xor_layers(data: &mut [u8], password: &str, salt: &[u8]) 
         let seq = generate_hybrid_sequence(password, salt, layer, data.len(), prev);
         let sbox = chaos_sbox(&seq, password, salt, layer, prev);
         let inv = inv_sbox(&sbox);
-        for byte in data.iter_mut() {
-            *byte = inv[*byte as usize];
-        }
+        // Eski dosyalar çözülürken ters S-kutusu sabit zamanlı; çıktı birebir aynı.
+        crate::chaotic2::ct_lookup(&inv, data);
 
         let perm = chaos_permutation(&seq, data.len());
         apply_permutation_inv(data, &perm);

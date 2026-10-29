@@ -153,6 +153,28 @@ fn sbox(l: &mut Lorenz) -> [u8; 256] {
     s
 }
 
+/// Sabit zamanlı tablo araması: veri baytı bellek adresi seçmesin diye (önbellek zamanlaması)
+/// her blok için 256 girdinin hepsi taranır; maske aritmetiği SIMD'e vektörleşir, çıktı aynı.
+pub(crate) fn ct_lookup(table: &[u8; 256], data: &mut [u8]) {
+    const BLK: usize = 4096;
+    let mut out = [0u8; BLK];
+    for chunk in data.chunks_mut(BLK) {
+        let out = &mut out[..chunk.len()];
+        out.fill(0);
+        for (i, &t) in table.iter().enumerate() {
+            let i = i as u8;
+            for (o, &d) in out.iter_mut().zip(chunk.iter()) {
+                // (d ^ i) == 0 ise 0xFF, değilse 0x00 — dalsız.
+                let x = (d ^ i) as u16;
+                let m = (x.wrapping_sub(1) >> 8) as u8;
+                *o |= t & m;
+            }
+        }
+        chunk.copy_from_slice(out);
+    }
+    out.zeroize();
+}
+
 fn xor_stream(l: &mut Lorenz, data: &mut [u8]) {
     for chunk in data.chunks_mut(8) {
         for (d, k) in chunk.iter_mut().zip(l.next_u64().to_le_bytes()) {
@@ -166,9 +188,7 @@ pub fn apply(data: &mut [u8], key: &[u8; 32], salt: &[u8]) {
     let mut l = seed(key, salt);
     let s = sbox(&mut l);
     xor_stream(&mut l, data);
-    for b in data.iter_mut() {
-        *b = s[*b as usize];
-    }
+    ct_lookup(&s, data);
 }
 
 /// `apply`'ın tam tersi: ters S-kutusu, sonra aynı akışla XOR.
@@ -179,9 +199,7 @@ pub fn reverse(data: &mut [u8], key: &[u8; 32], salt: &[u8]) {
     for (i, &v) in s.iter().enumerate() {
         inv[v as usize] = i as u8;
     }
-    for b in data.iter_mut() {
-        *b = inv[*b as usize];
-    }
+    ct_lookup(&inv, data);
     xor_stream(&mut l, data);
 }
 
