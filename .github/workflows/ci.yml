@@ -37,3 +37,16 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --release -- -D warnings
+
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz parsers and decrypt paths (60s each)
+        working-directory: fuzz
+        run: |
+          cargo fuzz run parse -- -max_total_time=60 -max_len=8192
+          cargo fuzz run decrypt -- -max_total_time=60 -max_len=8192

@@ -44,3 +44,41 @@ pub fn validate_password(password: &str) -> Result<()> {
     }
     Ok(())
 }
+
+static WORDLIST: &str = include_str!("bip39_english.txt");
+
+/// Rastgele parola cümlesi (BIP39 İngilizce listesi, 2048 kelime = kelime başına 11 bit).
+/// 9 kelime ≈ 99 bit: Argon2id (256 MiB) ile kaba kuvvet fiziksel olarak imkânsız düzeydedir.
+/// Sonuna iki rakam eklenir ki parola kurallarını (büyük harf, rakam, özel karakter) da sağlasın.
+pub fn generate_passphrase(words: usize) -> Result<String> {
+    let list: Vec<&str> = WORDLIST.lines().collect();
+    debug_assert_eq!(list.len(), 2048);
+    let mut buf = vec![0u8; words * 2 + 1];
+    crate::crypto::random_bytes(&mut buf)?;
+    let mut out: Vec<String> = buf[..words * 2]
+        .chunks(2)
+        .map(|c| {
+            // 2048 = 2^11: alt 11 bit yansız seçim verir.
+            let w = list[(u16::from_le_bytes([c[0], c[1]]) & 0x7FF) as usize];
+            let mut cs = w.chars();
+            cs.next()
+                .map(|f| f.to_ascii_uppercase().to_string() + cs.as_str())
+                .unwrap_or_default()
+        })
+        .collect();
+    out.push(format!("{:02}", buf[words * 2] % 100));
+    Ok(out.join("-"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passphrase_is_valid_and_random() {
+        let a = generate_passphrase(9).unwrap();
+        assert_eq!(a.split('-').count(), 10);
+        assert!(validate_password(&a).is_ok(), "{}", a);
+        assert_ne!(a, generate_passphrase(9).unwrap());
+    }
+}

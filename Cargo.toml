@@ -30,6 +30,8 @@ pqcrypto-traits = "0.3.5"
 clap = { version = "4.4", features = ["derive"] }
 subtle = "2.6"
 hmac = "0.12"
+ml-kem = { version = "0.3.3", features = ["getrandom", "zeroize"] }
+x25519-dalek = { version = "3", features = ["static_secrets", "zeroize"] }
 
 # Argon2 (256 MiB) debug derlemede de makul hızda çalışsın.
 [profile.dev.package.argon2]
@@ -37,3 +39,6 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

@@ -57,6 +57,12 @@ pub fn derive_key_argon2_strong(password: &str, salt: &[u8]) -> Result<[u8; KEY_
 
 /// kdf: 0 = PBKDF2, 1 = Argon2id, 2 = Argon2id güçlü. Bilinmeyen değer reddedilir.
 pub fn derive_key(password: &str, salt: &[u8], kdf: u8) -> Result<[u8; KEY_LEN]> {
+    // Fuzz derlemesinde (cargo fuzz, cfg(fuzzing)) Argon2 maliyeti ayrıştırıcıları test etmeyi imkânsızlaştırır.
+    #[cfg(fuzzing)]
+    if kdf <= KDF_ARGON2_STRONG {
+        let okm = hkdf_expand(password.as_bytes(), &[kdf], KEY_LEN, Some(salt))?;
+        return Ok(okm.try_into().expect("KEY_LEN"));
+    }
     match kdf {
         KDF_PBKDF2 => derive_key_pbkdf2(password, salt),
         KDF_ARGON2 => derive_key_argon2(password, salt),

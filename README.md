@@ -214,3 +214,17 @@ npm run tauri build
 | **S-box determinizm** | S-box sıralaması artık eşit `f64` değerlerde indeks ile kırılıyor; platformlar arası aynı girdi → aynı S-box. |
 | **Zayıf parola listesi** | Yalnızca sınırlı sayıda yaygın parola engelleniyor. Yüksek güvenlik ortamlarında harici liste (örn. rockyou) veya parola gücü (zxcvbn) entegrasyonu düşünülebilir. |
 | **cargo test (Windows)** | `pqcrypto-kyber` genelde ek C derleyici gerektirmez. Testler çalışmıyorsa MSVC toolchain ve güncel Rust sürümü kullanın. |
+
+---
+
+## Güvenlik modeli (v6/v7)
+
+- **Anahtar türetme:** Parola yalnızca **Argon2id (256 MiB, t=4)** ile işlenir; alt anahtarlar HKDF-SHA256 ile ayrılır. Ek katmanların (chaff, stego, dead-man, entropy, polymorphic, canary, plausible) hiçbiri parolayı hızlı hash ile kullanmaz.
+- **Bütünlük:** Başlık, sürüm, KDF ve nonce AES-256-GCM AAD'ye bağlıdır (sürüm/KDF düşürme reddedilir). AES ve alıcı modları STREAM yapısını kullanır: kesme, sıra değiştirme ve sona ekleme tespit edilir.
+- **Kyber (v7, hibrit post-kuantum):** Anahtar kapsülleme ML-KEM-768 (NIST FIPS 203) + X25519 birleşimidir (X-Wing tarzı); dosya anahtarı ayrıca Argon2id(parola) ile birleştirilir. Açmak için kafes problemi, eliptik eğri ve parola birlikte aşılmalıdır. Anahtar dosyasını şifreli dosyadan **ayrı** saklayın. Eski v2/v6 Kyber dosyaları okunmaya devam eder.
+- **Alıcı modu:** `kaotik keygen --public-out ben.pub --secret-out ben.sec` ile anahtar çifti üretilir. Gönderici `--mode recipient --recipient ben.pub` ile parola bilmeden şifreler; yalnızca gizli anahtar + parola sahibi açar. Dosya anahtarı 256-bit rastgele bir KEM sırrından gelir; parola yalnızca gizli anahtar dosyasını korur.
+- **Parola:** `kaotik passgen` 9 kelimelik (≈99 bit) rastgele parola cümlesi üretir (BIP39 listesi). İnsanların uydurduğu parolalar genellikle 30–40 bit civarındadır; hiçbir kod bunu telafi edemez.
+- **Plausible deniability:** Konteyner sihirli bayt/uzunluk içermez; iki eşit boyutlu, rastgeleden ayırt edilemeyen yuvadan oluşur.
+- **Dead-man switch:** Son tarih AAD ile doğrulanır. Çevrimdışı zaman kilidi yerel saate dayanır; parola sahibinin saati geri alması engellenemez.
+- **Fuzzing:** `fuzz/` altındaki cargo-fuzz hedefleri tüm ayrıştırıcıları ve çözme yollarını bozuk girdiyle dener (CI'da her push'ta kısa tur).
+- **Sınırlar:** Güvenlik açık algoritmalardan ve anahtarın gizliliğinden gelir (Kerckhoffs ilkesi); kodun gizli olması gerekmez. Bu kod bağımsız bir kriptografik denetimden geçmemiştir; `ml-kem` crate'i de bağımsız denetimden geçmemiştir.

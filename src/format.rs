@@ -15,6 +15,10 @@ pub const VERSION_AES_CHUNKED: u16 = 4;
 pub const VERSION_KAOTIK_PADDED: u16 = 5;
 /// v6: başlık + tüm metaveri AEAD AAD'ye bağlı; AES modu STREAM (son blok bayrağı), Kyber hibrit (KEM + parola).
 pub const VERSION_AEAD_BOUND: u16 = 6;
+/// v7: post-kuantum hibrit KEM (ML-KEM-768 + X25519) — kyber ve alıcı modları.
+pub const VERSION_PQ_HYBRID: u16 = 7;
+/// Alıcı açık anahtar dosyası sihirli baytları.
+pub const PUBKEY_MAGIC: &[u8; 8] = b"KAOSPUB1";
 /// Başlık uzunluğu: magic(4) + version(2) + format(1).
 pub const HEADER_LEN: usize = 7;
 
@@ -30,6 +34,7 @@ pub fn header_bytes(version: u16, format_byte: u8) -> [u8; HEADER_LEN] {
 pub const FORMAT_KAOTIK: u8 = 0x01;
 pub const FORMAT_KYBER: u8 = 0x02;
 pub const FORMAT_AES: u8 = 0x03;
+pub const FORMAT_RECIPIENT: u8 = 0x04;
 
 pub type KaotikPayload = ([u8; SALT_LEN], u8, [u8; NONCE_LEN], Vec<u8>);
 pub type EncryptedSecretKeyPayload = (u8, [u8; SALT_LEN], u8, [u8; NONCE_LEN], Vec<u8>);

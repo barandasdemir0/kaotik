@@ -1,8 +1,8 @@
 //! Kaotik CLI: encrypt, decrypt, verify + advanced security modes.
 use clap::{Parser, Subcommand};
 use kaotik::{
-    decrypt_aes, decrypt_kaotik, decrypt_kyber, encrypt_aes, encrypt_kaotik, encrypt_kyber,
-    verify_file,
+    decrypt_aes, decrypt_from_recipient, decrypt_kaotik, decrypt_kyber, encrypt_aes,
+    encrypt_kaotik, encrypt_kyber, encrypt_to_recipient, verify_file,
 };
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -24,7 +24,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Şifrele: --input, --output, --password (veya KAOTIK_PASSWORD), --mode kaotik|aes|kyber
+    /// Şifrele: --input, --output, --password (veya KAOTIK_PASSWORD), --mode kaotik|aes|kyber|recipient
     Encrypt {
         #[arg(short, long)]
         input: String,
@@ -36,6 +36,9 @@ enum Commands {
         mode: String,
         #[arg(long)]
         key_out: Option<String>,
+        /// Alıcının açık anahtar dosyası (--mode recipient; parola gerekmez).
+        #[arg(long)]
+        recipient: Option<String>,
         #[arg(long)]
         gps: Option<String>,
         #[arg(long)]
@@ -81,6 +84,20 @@ enum Commands {
         polymorphic: bool,
         #[arg(long)]
         quantum_canary: bool,
+    },
+    /// Alıcı anahtar çifti üret: açık anahtar paylaşılır, gizli anahtar parola ile korunur.
+    Keygen {
+        #[arg(long)]
+        public_out: String,
+        #[arg(long)]
+        secret_out: String,
+        #[arg(short, long)]
+        password: Option<String>,
+    },
+    /// Güçlü rastgele parola cümlesi üret (varsayılan 9 kelime ≈ 99 bit).
+    Passgen {
+        #[arg(long, default_value_t = 9)]
+        words: usize,
     },
     /// Dosya yapısını doğrula (header + format); parola gerekmez.
     Verify {
@@ -207,6 +224,7 @@ fn run() -> kaotik::Result<()> {
             password,
             mode,
             key_out,
+            recipient,
             gps,
             time_slot,
             mutating,
@@ -216,6 +234,41 @@ fn run() -> kaotik::Result<()> {
             polymorphic,
             quantum_canary,
         } => {
+            if mode.eq_ignore_ascii_case("recipient") {
+                let layers = mutating
+                    || not_after_unix.is_some()
+                    || entropy_poison
+                    || polymorphic
+                    || quantum_canary
+                    || gps.is_some()
+                    || time_slot.is_some();
+                if layers {
+                    return Err(kaotik::Error::Format(
+                        "--mode recipient does not combine with password layers".into(),
+                    ));
+                }
+                let path = recipient.ok_or_else(|| {
+                    kaotik::Error::Format(
+                        "--mode recipient requires --recipient <public key>".into(),
+                    )
+                })?;
+                let reader: Box<dyn Read> = if input == "-" {
+                    Box::new(io::stdin())
+                } else {
+                    Box::new(File::open(&input)?)
+                };
+                let mut buf = Vec::new();
+                encrypt_to_recipient(
+                    io::BufReader::new(reader),
+                    &mut buf,
+                    &mut File::open(&path)?,
+                )?;
+                return if output == "-" {
+                    Ok(io::stdout().write_all(&buf)?)
+                } else {
+                    Ok(std::fs::write(&output, buf)?)
+                };
+            }
             let env_pass = std::env::var(PASSWORD_ENV).ok();
             let mut pwd = get_password(env_pass, password)?;
             let mutation_seed = if mutating {
@@ -250,7 +303,7 @@ fn run() -> kaotik::Result<()> {
                     }
                     _ => {
                         return Err(kaotik::Error::Format(
-                            "Invalid mode. Use kaotik, aes, or kyber.".into(),
+                            "Invalid mode. Use kaotik, aes, kyber, or recipient.".into(),
                         ));
                     }
                 }
@@ -396,9 +449,21 @@ fn run() -> kaotik::Result<()> {
                         let mut key_read = File::open(&path)?;
                         decrypt_kyber(&mut reader, &mut out_buf, &ctx_pwd, &mut key_read)?;
                     }
+                    "recipient" => {
+                        let path = key_file.as_deref().ok_or_else(|| {
+                            kaotik::Error::Format("Recipient mode requires --key-file".into())
+                        })?;
+                        // Alıcı modunda parola gizli anahtarı korur; bağlam katmanları uygulanmaz.
+                        decrypt_from_recipient(
+                            &mut reader,
+                            &mut out_buf,
+                            &pwd,
+                            &mut File::open(path)?,
+                        )?;
+                    }
                     _ => {
                         return Err(kaotik::Error::Format(
-                            "Invalid mode. Use kaotik, aes, or kyber.".into(),
+                            "Invalid mode. Use kaotik, aes, kyber, or recipient.".into(),
                         ));
                     }
                 }
@@ -424,6 +489,34 @@ fn run() -> kaotik::Result<()> {
 
             pwd.zeroize();
             ctx_pwd.zeroize();
+            Ok(())
+        }
+        Commands::Keygen {
+            public_out,
+            secret_out,
+            password,
+        } => {
+            let mut pwd = get_password(std::env::var(PASSWORD_ENV).ok(), password)?;
+            let r = kaotik::generate_recipient_keys(
+                &pwd,
+                &mut File::create(&public_out)?,
+                &mut File::create(&secret_out)?,
+            );
+            pwd.zeroize();
+            r?;
+            eprintln!(
+                "Public key: {} (paylaşılabilir). Secret key: {} (gizli tutun, yedekleyin).",
+                public_out, secret_out
+            );
+            Ok(())
+        }
+        Commands::Passgen { words } => {
+            if words < 7 {
+                return Err(kaotik::Error::Password(
+                    "Use at least 7 words (~77 bits)".into(),
+                ));
+            }
+            println!("{}", kaotik::generate_passphrase(words)?);
             Ok(())
         }
         Commands::Verify { input } => {
