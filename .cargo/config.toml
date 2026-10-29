@@ -1,0 +1,11 @@
+# Offline / vendored build. Önce bir kez: cargo vendor vendor/ (internet açıkken).
+# Sonra bu config ile cargo artık sadece vendor/ kullanır, internete çıkmaz.
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
+[net]
+offline = true
