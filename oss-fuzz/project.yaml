@@ -1,0 +1,8 @@
+homepage: "https://github.com/barandasdemir0/kaotik"
+main_repo: "https://github.com/barandasdemir0/kaotik"
+language: rust
+primary_contact: "TODO@example.com"
+fuzzing_engines:
+  - libfuzzer
+sanitizers:
+  - address

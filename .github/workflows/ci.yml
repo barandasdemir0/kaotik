@@ -45,8 +45,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-      - name: Fuzz parsers and decrypt paths (60s each)
+      # Kök .cargo/config.toml crates.io'yu offline vendor/'a yönlendiriyor ve vendor/'da
+      # libfuzzer-sys yok; cargo bu yönlendirmeyi env/--config ile geri almaya izin vermiyor.
+      # Yalnızca bu CI kopyasında kaldırılır.
+      - name: Drop offline vendor config (CI checkout only)
+        run: rm -f .cargo/config.toml
+      - name: Fuzz all targets (60s each)
         working-directory: fuzz
         run: |
-          cargo fuzz run parse -- -max_total_time=60 -max_len=8192
-          cargo fuzz run decrypt -- -max_total_time=60 -max_len=8192
+          cargo fuzz build -O
+          for t in parse decrypt sign_verify chaotic_roundtrip kem; do
+            mkdir -p corpus/$t
+            cargo fuzz run -O $t corpus/$t seeds/$t -- -max_total_time=60 -max_len=8192
+          done

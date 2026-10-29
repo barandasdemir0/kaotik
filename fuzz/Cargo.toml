@@ -25,4 +25,25 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "sign_verify"
+path = "fuzz_targets/sign_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chaotic_roundtrip"
+path = "fuzz_targets/chaotic_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kem"
+path = "fuzz_targets/kem.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

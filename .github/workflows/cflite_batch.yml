@@ -1,0 +1,42 @@
+name: ClusterFuzzLite batch fuzzing
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+permissions: read-all
+jobs:
+  BatchFuzzing:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Build fuzzers
+        uses: google/clusterfuzzlite/actions/build_fuzzers@v1
+        with:
+          language: rust
+          sanitizer: address
+      - name: Run fuzzers
+        uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 3600
+          mode: batch
+          sanitizer: address
+          output-sarif: false
+  Prune:
+    needs: BatchFuzzing
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Build fuzzers
+        uses: google/clusterfuzzlite/actions/build_fuzzers@v1
+        with:
+          language: rust
+      - name: Prune corpus
+        uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 600
+          mode: prune
+          output-sarif: false
