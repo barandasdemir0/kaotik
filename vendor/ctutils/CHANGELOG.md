@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.7 (2026-10-29)
+### Security
+- Thumb-1 (Cortex-M0) and RISCV32 constant-time hardening ([#1580])
+
+[#1580]: https://github.com/RustCrypto/utils/pull/1580
+
+## 0.4.6 (2026-10-25)
+### Added
+- `primitives::borrowing_sub_mask_u32`/`_u64` for propagating word-sized
+  borrow masks without per-limb `Choice` conversions ([#1577])
+
+[#1577]: https://github.com/RustCrypto/utils/pull/1577
+
+## 0.4.5 (2026-10-23)
+### Added
+- `primitives` module ([#1570], [#1572])
+
+### Fixed
+- Harden Thumb-1 comparisons and `Choice` composition ([#1571])
+
+[#1570]: https://github.com/RustCrypto/utils/pull/1570
+[#1571]: https://github.com/RustCrypto/utils/pull/1571
+[#1572]: https://github.com/RustCrypto/utils/pull/1572
+
+## 0.4.4 (2026-10-23)
+### Security
+- Fix and verify `Choice::to_*_mask` constant-time codegen ([#1567])
+- Fix constant-time `u128` comparisons on 32-bit targets ([#1568])
+
+[#1567]: https://github.com/RustCrypto/utils/pull/1567
+[#1568]: https://github.com/RustCrypto/utils/pull/1568
+
 ## 0.4.3 (2026-10-06)
 ### Changed
 - Make `Choice::{to_bool, to_u8}` into `const fn` ([#1547])

@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+          - os: macos-latest
+            name: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --release --offline --features ffi
+      - name: Build CLI and C library
+        run: cargo build --release --offline --features ffi
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="kaotik-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir -p "$out/lib" "$out/include"
+          cp include/kaotik.h "$out/include/"
+          cp README.md LICENSE CHANGELOG.md GUVENLIK_MODELI.md "$out/"
+          cd target/release
+          for f in kaotik kaotik.exe libkaotik.so libkaotik.a libkaotik.dylib kaotik.dll kaotik.dll.lib kaotik.lib; do
+            if [ -f "$f" ]; then
+              case "$f" in kaotik|kaotik.exe) cp "$f" "../../$out/" ;; *) cp "$f" "../../$out/lib/" ;; esac
+            fi
+          done
+          cd ../..
+          tar -czf "$out.tar.gz" "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: kaotik-*.tar.gz
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Build
+        run: cargo build --release --offline --lib --target wasm32-unknown-unknown --features wasm
+      - name: Generate JS bindings
+        run: |
+          set -euo pipefail
+          V=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | cut -d'"' -f2)
+          mv .cargo/config.toml /tmp/cargo-config.toml
+          cargo install wasm-bindgen-cli --version "$V" --locked
+          mv /tmp/cargo-config.toml .cargo/config.toml
+          out="kaotik-${GITHUB_REF_NAME}-wasm"
+          wasm-bindgen --target web --out-dir "$out/web" target/wasm32-unknown-unknown/release/kaotik.wasm
+          wasm-bindgen --target nodejs --out-dir "$out/node" target/wasm32-unknown-unknown/release/kaotik.wasm
+          cp bindings/js/README.md "$out/"
+          tar -czf "$out.tar.gz" "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: kaotik-*.tar.gz
+
+  publish:
+    needs: [native, wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and release notes
+        run: |
+          set -euo pipefail
+          cp bindings/python/kaotik.py dist/
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+          ver="${GITHUB_REF_NAME}"
+          awk -v v="## ${ver} " 'index($0, v)==1 {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "Kaotik ${ver}" > notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: notes.md
+          files: dist/*
