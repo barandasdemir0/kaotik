@@ -45,3 +45,16 @@ opt-level = 3
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+# Reproducible, hardened release builds (see .github/workflows/release.yml).
+[profile.release]
+codegen-units = 1      # deterministic codegen partitioning, better optimization
+lto = true
+# panic = "abort" is intentionally NOT set: zeroize-on-drop (Zeroizing<..>,
+# ZeroizeOnDrop) only wipes secrets if Drop runs, which requires unwinding.
+strip = "symbols"      # no local paths/symbols in the shipped binary
+debug = false
+incremental = false
+# Overflow checks are cheap here and turn silent wrap-around in length/offset
+# arithmetic (header parsing, chunk counters) into a clean panic.
+overflow-checks = true
