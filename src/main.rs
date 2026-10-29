@@ -135,6 +135,9 @@ enum Commands {
         output: String,
         #[arg(long)]
         not_after_unix: u64,
+        /// Son tarihe kadar açmak için parola (KAOTIK_PASSWORD ortam değişkeni de kullanılabilir).
+        #[arg(short, long)]
+        password: Option<String>,
         #[arg(long)]
         emergency_key: Option<String>,
     },
@@ -144,6 +147,8 @@ enum Commands {
         input: String,
         #[arg(short, long)]
         output: String,
+        #[arg(short, long)]
+        password: Option<String>,
         #[arg(long)]
         emergency_key: Option<String>,
     },
@@ -245,14 +250,16 @@ fn run() -> kaotik::Result<()> {
                 }
 
                 let final_blob = if let Some(expiry) = not_after_unix {
-                    cli_ext::deadman_wrap(&tmp_out, expiry, emergency_key.as_deref())
+                    cli_ext::deadman_wrap(&tmp_out, expiry, &ctx_pwd, emergency_key.as_deref())
+                        .map_err(kaotik::Error::Format)?
                 } else {
                     tmp_out
                 };
 
                 let mut wrapped = final_blob;
                 if quantum_canary {
-                    wrapped = cli_ext::quantum_canary_wrap(&wrapped, &ctx_pwd);
+                    wrapped = cli_ext::quantum_canary_wrap(&wrapped, &ctx_pwd)
+                        .map_err(kaotik::Error::Format)?;
                 }
                 if entropy_poison {
                     wrapped = cli_ext::entropy_poison_wrap(&wrapped, &ctx_pwd)
@@ -331,7 +338,7 @@ fn run() -> kaotik::Result<()> {
                         .map_err(kaotik::Error::Format)?;
                 }
 
-                let unwrapped = cli_ext::deadman_unwrap(&outer, emergency_key.as_deref())
+                let unwrapped = cli_ext::deadman_unwrap(&outer, Some(&ctx_pwd), emergency_key.as_deref())
                     .map_err(kaotik::Error::Format)?;
                 let mut reader = io::Cursor::new(unwrapped);
                 let mut out_buf = Vec::new();
@@ -433,21 +440,32 @@ fn run() -> kaotik::Result<()> {
             input,
             output,
             not_after_unix,
+            password,
             emergency_key,
         } => {
+            let mut pwd = get_password(std::env::var(PASSWORD_ENV).ok(), password)?;
             let blob = std::fs::read(&input)?;
-            let wrapped = cli_ext::deadman_wrap(&blob, not_after_unix, emergency_key.as_deref());
+            let wrapped = cli_ext::deadman_wrap(&blob, not_after_unix, &pwd, emergency_key.as_deref())
+                .map_err(kaotik::Error::Format);
+            pwd.zeroize();
+            let wrapped = wrapped?;
             std::fs::write(&output, wrapped)?;
             Ok(())
         }
         Commands::UnsealSwitch {
             input,
             output,
+            password,
             emergency_key,
         } => {
+            let mut pwd = password.or_else(|| std::env::var(PASSWORD_ENV).ok());
             let blob = std::fs::read(&input)?;
-            let unwrapped =
-                cli_ext::deadman_unwrap(&blob, emergency_key.as_deref()).map_err(kaotik::Error::Format)?;
+            let unwrapped = cli_ext::deadman_unwrap(&blob, pwd.as_deref(), emergency_key.as_deref())
+                .map_err(kaotik::Error::Format);
+            if let Some(p) = pwd.as_mut() {
+                p.zeroize();
+            }
+            let unwrapped = unwrapped?;
             std::fs::write(&output, unwrapped)?;
             Ok(())
         }

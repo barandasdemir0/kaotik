@@ -20,7 +20,7 @@ pub use format::{
     write_encrypted_secret_key, write_aes_chunked_start,
     write_kyber_payload, read_kyber_payload,
     FORMAT_AES, FORMAT_KAOTIK, FORMAT_KYBER,
-    VERSION_AES_CHUNKED, VERSION_CURRENT, VERSION_KAOTIK_PADDED, VERSION_LEGACY,
+    VERSION_AEAD_BOUND, VERSION_AES_CHUNKED, VERSION_CURRENT, VERSION_KAOTIK_PADDED, VERSION_LEGACY,
 };
 
 use std::io::{Read, Write};
@@ -87,33 +87,63 @@ fn remove_random_padding(padded: &[u8]) -> Result<Vec<u8>> {
     Ok(payload[..real_len].to_vec())
 }
 
+/// v6 kaotik anahtarları: AEAD anahtarı ve kaotik katman anahtarı aynı Argon2id ana anahtarından HKDF ile ayrılır.
+fn kaotik_v6_keys(master: &[u8; crypto::KEY_LEN]) -> Result<([u8; crypto::KEY_LEN], Zeroizing<String>)> {
+    let aead_key = crypto::subkey(master, b"kaotik-v6-aead")?;
+    let mut chaos = crypto::subkey(master, b"kaotik-v6-chaos")?;
+    let mut s = Zeroizing::new(String::with_capacity(64));
+    for b in chaos.iter() {
+        s.push_str(&format!("{:02x}", b));
+    }
+    crypto::secure_zero(&mut chaos);
+    Ok((aead_key, s))
+}
+
+/// Okuyucudan tamponu doldurur (kısa okumaları birleştirir). Okunan bayt sayısını döner.
+fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(filled)
+}
+
 /// Kaotik mod: parola + 8 katman kaotik (XOR, permütasyon, S-box) + AES-256-GCM. Tek seferde belleğe alır; büyük dosya için AES modu kullanın.
+/// v6: Argon2id (256 MiB) ana anahtar → HKDF alt anahtarları; başlık ve metaveri AAD ile doğrulanır.
 pub fn encrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password: &str) -> Result<()> {
     validate_password(password)?;
     let salt = crypto::gen_salt()?;
     let nonce = crypto::gen_nonce()?;
-    let kdf = crypto::KDF_ARGON2;
-    let mut key = crypto::derive_key(password, &salt, kdf)?;
+    let kdf = crypto::KDF_DEFAULT;
     let mut plaintext = Zeroizing::new(Vec::new());
     reader.read_to_end(&mut plaintext)?;
     if plaintext.len() > MAX_KAOTIK_SIZE {
-        crypto::secure_zero(&mut key);
         return Err(Error::Format(format!(
             "Kaotik mode: input too large ({} bytes, max {} bytes). Use --mode aes for large files.",
             plaintext.len(), MAX_KAOTIK_SIZE
         )));
     }
+    let mut master = crypto::derive_key(password, &salt, kdf)?;
+    let (mut key, chaos_key) = kaotik_v6_keys(&master)?;
+    crypto::secure_zero(&mut master);
     let mut padded = apply_random_padding(&plaintext)?;
-    chaotic::apply_chaotic_xor_layers(&mut padded, password, &salt)?;
-    let ciphertext_with_tag = crypto::aes_gcm_encrypt(&key, &nonce, &padded)?;
+    chaotic::apply_chaotic_xor_layers(&mut padded, &chaos_key, &salt)?;
+    let header = format::header_bytes(format::VERSION_AEAD_BOUND, format::FORMAT_KAOTIK);
+    let aad = [&header[..], &salt[..], &[kdf], &nonce[..]].concat();
+    let ciphertext_with_tag = crypto::aes_gcm_encrypt_aad(&key, &nonce, &padded, &aad)?;
     crypto::secure_zero(plaintext.as_mut_slice());
-    format::write_header(&mut writer, format::VERSION_KAOTIK_PADDED, format::FORMAT_KAOTIK)?;
-    format::write_kaotik_payload(&mut writer, &salt, kdf, &nonce, &ciphertext_with_tag)?;
     crypto::secure_zero(&mut key);
+    writer.write_all(&header)?;
+    format::write_kaotik_payload(&mut writer, &salt, kdf, &nonce, &ciphertext_with_tag)?;
     Ok(())
 }
 
-/// Kaotik mod dosyasını parola ile çözer.
+/// Kaotik mod dosyasını parola ile çözer (v2–v6).
 pub fn decrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password: &str) -> Result<()> {
     let start = Instant::now();
     let result = (|| {
@@ -126,9 +156,24 @@ pub fn decrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password:
         if ciphertext_with_tag.len() > MAX_KAOTIK_SIZE + MAX_KAOTIK_PADDING_OVERHEAD + 32 {
             return Err(Error::Format("Kaotik ciphertext too large".into()));
         }
-        let mut key = crypto::derive_key(password, &salt, kdf)?;
-        let mut padded_plain = Zeroizing::new(crypto::aes_gcm_decrypt(&key, &nonce, &ciphertext_with_tag)?);
-        chaotic::reverse_chaotic_xor_layers(&mut padded_plain, password, &salt)?;
+        let mut master = crypto::derive_key(password, &salt, kdf)?;
+        let mut padded_plain = if version >= format::VERSION_AEAD_BOUND {
+            let (mut key, chaos_key) = kaotik_v6_keys(&master)?;
+            crypto::secure_zero(&mut master);
+            let header = format::header_bytes(version, format_byte);
+            let aad = [&header[..], &salt[..], &[kdf], &nonce[..]].concat();
+            let dec = crypto::aes_gcm_decrypt_aad(&key, &nonce, &ciphertext_with_tag, &aad);
+            crypto::secure_zero(&mut key);
+            let mut p = Zeroizing::new(dec?);
+            chaotic::reverse_chaotic_xor_layers(&mut p, &chaos_key, &salt)?;
+            p
+        } else {
+            let dec = crypto::aes_gcm_decrypt(&master, &nonce, &ciphertext_with_tag);
+            crypto::secure_zero(&mut master);
+            let mut p = Zeroizing::new(dec?);
+            chaotic::reverse_chaotic_xor_layers(&mut p, password, &salt)?;
+            p
+        };
         let mut final_plain = if version >= format::VERSION_KAOTIK_PADDED {
             Zeroizing::new(remove_random_padding(&padded_plain)?)
         } else {
@@ -137,14 +182,27 @@ pub fn decrypt_kaotik<R: Read, W: Write>(mut reader: R, mut writer: W, password:
         writer.write_all(&final_plain)?;
         crypto::secure_zero(final_plain.as_mut_slice());
         crypto::secure_zero(padded_plain.as_mut_slice());
-        crypto::secure_zero(&mut key);
         Ok(())
     })();
     enforce_min_decrypt_duration(start);
     result
 }
 
-/// Kyber mod: NIST ML-KEM Kyber-768. Paylaşılan gizlilik AES anahtarı olur; gizli anahtar `secret_key_out`'a parola ile şifrelenmiş yazılır.
+/// Kyber hibrit anahtar: HKDF(KEM paylaşılan sırrı || Argon2id(parola)). Saldırgan dosyayı açmak için
+/// hem Kyber gizli anahtarını kırmalı/ele geçirmeli hem de parolayı bulmalıdır (biri kırılsa diğeri korur).
+fn kyber_hybrid_key(ss: &[u8], pw_key: &[u8; crypto::KEY_LEN], salt: &[u8], kem_ct: &[u8]) -> Result<[u8; crypto::KEY_LEN]> {
+    use sha2::{Digest, Sha256};
+    let ct_hash = Sha256::digest(kem_ct);
+    let ikm = Zeroizing::new([ss, &pw_key[..]].concat());
+    let info = [&b"kaotik-v6-kyber-hybrid"[..], &ct_hash[..]].concat();
+    let okm = Zeroizing::new(crypto::hkdf_expand(&ikm, &info, crypto::KEY_LEN, Some(salt))?);
+    let mut k = [0u8; crypto::KEY_LEN];
+    k.copy_from_slice(&okm);
+    Ok(k)
+}
+
+/// Kyber mod: NIST Kyber-768 + parola hibrit. Gizli anahtar `secret_key_out`'a parola ile şifrelenmiş yazılır.
+/// Anahtar dosyasını şifreli dosyadan AYRI saklayın: ikisi ayrı faktördür.
 pub fn encrypt_kyber<R: Read, W: Write>(
     mut reader: R,
     mut writer: W,
@@ -152,67 +210,79 @@ pub fn encrypt_kyber<R: Read, W: Write>(
     secret_key_out: &mut dyn Write,
 ) -> Result<()> {
     validate_password(password)?;
-    let mut kp = nist_kyber::generate_keypair()?;
-    let (mut ss, kem_ct) = nist_kyber::encapsulate(&kp.public_key)?;
+    let kp = nist_kyber::generate_keypair()?;
+    let (ss, kem_ct) = nist_kyber::encapsulate(&kp.public_key)?;
+    let ss = Zeroizing::new(ss);
     if ss.len() < 32 {
-        crypto::secure_zero(ss.as_mut_slice());
         return Err(Error::Crypto("Kyber shared secret too short".into()));
     }
-    let mut aes_key: [u8; 32] = ss[..32]
-        .try_into()
-        .map_err(|_| Error::Crypto("Kyber shared secret too short".into()))?;
+    let salt = crypto::gen_salt()?;
+    let kdf = crypto::KDF_DEFAULT;
+    let mut pw_key = crypto::derive_key(password, &salt, kdf)?;
+    let mut aes_key = kyber_hybrid_key(&ss, &pw_key, &salt, &kem_ct)?;
+    crypto::secure_zero(&mut pw_key);
     let nonce = crypto::gen_nonce()?;
     let mut plaintext = Zeroizing::new(Vec::new());
     reader.read_to_end(&mut plaintext)?;
-    let ciphertext_with_tag = crypto::aes_gcm_encrypt(&aes_key, &nonce, &plaintext)?;
+    let header = format::header_bytes(format::VERSION_AEAD_BOUND, format::FORMAT_KYBER);
+    let aad = [&header[..], &(kem_ct.len() as u32).to_le_bytes(), &kem_ct, &salt[..], &[kdf], &nonce[..]].concat();
+    let ciphertext_with_tag = crypto::aes_gcm_encrypt_aad(&aes_key, &nonce, &plaintext, &aad)?;
     crypto::secure_zero(plaintext.as_mut_slice());
-    format::write_header(&mut writer, format::VERSION_LEGACY, format::FORMAT_KYBER)?;
-    format::write_kyber_payload(&mut writer, &kem_ct, &nonce, &ciphertext_with_tag)?;
+    crypto::secure_zero(&mut aes_key);
+    writer.write_all(&header)?;
+    format::write_kyber_payload_v6(&mut writer, &kem_ct, &salt, kdf, &nonce, &ciphertext_with_tag)?;
     let key_salt = crypto::gen_salt()?;
     let key_nonce = crypto::gen_nonce()?;
-    let kdf = crypto::KDF_ARGON2;
     let mut key_file_key = crypto::derive_key(password, &key_salt, kdf)?;
     let encrypted_sk = crypto::aes_gcm_encrypt(&key_file_key, &key_nonce, &kp.secret_key)?;
-    format::write_encrypted_secret_key(secret_key_out, 3, &key_salt, kdf, &key_nonce, &encrypted_sk)?;
-    crypto::secure_zero(ss.as_mut_slice());
-    crypto::secure_zero(&mut aes_key);
-    crypto::secure_zero(kp.secret_key.as_mut_slice());
     crypto::secure_zero(&mut key_file_key);
+    format::write_encrypted_secret_key(secret_key_out, 3, &key_salt, kdf, &key_nonce, &encrypted_sk)?;
     Ok(())
 }
 
-/// AES modu: sadece AES-256-GCM, 64 KiB chunk (streaming). Büyük dosyalar bellekte tutulmaz.
+/// AES modu: AES-256-GCM STREAM, 64 KiB bloklar. Her blok sayaç + son-blok bayrağı içeren nonce ile şifrelenir;
+/// başlık AAD'ye bağlıdır. Kesme, yeniden sıralama ve blok değiştirme tespit edilir.
 pub fn encrypt_aes<R: Read, W: Write>(mut reader: R, mut writer: W, password: &str) -> Result<()> {
     validate_password(password)?;
     let salt = crypto::gen_salt()?;
-    let base_nonce = crypto::gen_nonce()?;
-    let kdf = crypto::KDF_ARGON2;
-    let mut key = crypto::derive_key(password, &salt, kdf)?;
-    format::write_header(&mut writer, format::VERSION_AES_CHUNKED, format::FORMAT_AES)?;
-    format::write_aes_chunked_start(&mut writer, &salt, kdf, &base_nonce)?;
-    let mut chunk_index: u32 = 0;
-    let mut buf = vec![0u8; AES_CHUNK_SIZE];
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
+    let mut prefix = [0u8; 7];
+    crypto::random_bytes(&mut prefix)?;
+    let kdf = crypto::KDF_DEFAULT;
+    let mut master = crypto::derive_key(password, &salt, kdf)?;
+    let mut key = crypto::subkey(&master, b"kaotik-v6-aes-stream")?;
+    crypto::secure_zero(&mut master);
+    let header = format::header_bytes(format::VERSION_AEAD_BOUND, format::FORMAT_AES);
+    let aad = [&header[..], &salt[..], &[kdf], &prefix[..]].concat();
+    writer.write_all(&header)?;
+    format::write_aes_stream_start(&mut writer, &salt, kdf, &prefix)?;
+
+    let result = (|| -> Result<()> {
+        let mut cur = Zeroizing::new(vec![0u8; AES_CHUNK_SIZE]);
+        let mut next = Zeroizing::new(vec![0u8; AES_CHUNK_SIZE]);
+        let mut cur_len = read_full(&mut reader, &mut cur)?;
+        let mut counter: u32 = 0;
+        loop {
+            let next_len = if cur_len == AES_CHUNK_SIZE { read_full(&mut reader, &mut next)? } else { 0 };
+            let last = next_len == 0;
+            let nonce = crypto::stream_nonce(&prefix, counter, last);
+            let ct = crypto::aes_gcm_encrypt_aad(&key, &nonce, &cur[..cur_len], &aad)?;
+            writer.write_all(&[last as u8])?;
+            writer.write_all(&(ct.len() as u32).to_le_bytes())?;
+            writer.write_all(&ct)?;
+            if last {
+                return Ok(());
+            }
+            counter = counter.checked_add(1).ok_or_else(|| Error::Format("Too many chunks".into()))?;
+            std::mem::swap(&mut cur, &mut next);
+            cur_len = next_len;
         }
-        let nonce = crypto::nonce_for_chunk(&base_nonce, chunk_index);
-        let ct = crypto::aes_gcm_encrypt(&key, &nonce, &buf[..n])?;
-        writer.write_all(&(ct.len() as u32).to_le_bytes())?;
-        writer.write_all(&ct)?;
-        chunk_index = chunk_index.saturating_add(1);
-        if chunk_index == u32::MAX {
-            crypto::secure_zero(&mut key);
-            return Err(Error::Format("Too many chunks".into()));
-        }
-    }
-    writer.write_all(&0u32.to_le_bytes())?;
+    })();
     crypto::secure_zero(&mut key);
-    Ok(())
+    result
 }
 
-/// AES modu dosyasını çözer. v4 (chunked) ve v3 (tek blok) format desteklenir.
+/// AES modu dosyasını çözer. v6 (STREAM), v4 (chunked) ve v3 (tek blok) desteklenir.
+/// Not: akış modunda doğrulanmış bloklar sırayla yazılır; bozulma tespit edilirse hata döner ve çıktı eksik kabul edilmelidir.
 pub fn decrypt_aes<R: Read, W: Write>(mut reader: R, mut writer: W, password: &str) -> Result<()> {
     let start = Instant::now();
     let result = (|| {
@@ -221,7 +291,45 @@ pub fn decrypt_aes<R: Read, W: Write>(mut reader: R, mut writer: W, password: &s
         if format_byte != format::FORMAT_AES {
             return Err(Error::Format("Not an AES format file".into()));
         }
-        if version >= format::VERSION_AES_CHUNKED {
+        if version >= format::VERSION_AEAD_BOUND {
+            let (salt, kdf, prefix) = format::read_aes_stream_start(&mut reader)?;
+            let mut master = crypto::derive_key(password, &salt, kdf)?;
+            let mut key = crypto::subkey(&master, b"kaotik-v6-aes-stream")?;
+            crypto::secure_zero(&mut master);
+            let header = format::header_bytes(version, format_byte);
+            let aad = [&header[..], &salt[..], &[kdf], &prefix[..]].concat();
+            let r = (|| -> Result<()> {
+                let mut counter: u32 = 0;
+                loop {
+                    let mut frame = [0u8; 5];
+                    reader.read_exact(&mut frame).map_err(|_| Error::Crypto("Decryption failed: stream truncated".into()))?;
+                    let last = match frame[0] {
+                        0 => false,
+                        1 => true,
+                        _ => return Err(Error::Crypto("Decryption failed".into())),
+                    };
+                    let len = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+                    if len > AES_CHUNK_SIZE + crypto::TAG_LEN {
+                        return Err(Error::Format("Chunk size exceeds limit".into()));
+                    }
+                    let mut ct = vec![0u8; len];
+                    reader.read_exact(&mut ct).map_err(|_| Error::Crypto("Decryption failed: stream truncated".into()))?;
+                    let nonce = crypto::stream_nonce(&prefix, counter, last);
+                    let pt = Zeroizing::new(crypto::aes_gcm_decrypt_aad(&key, &nonce, &ct, &aad)?);
+                    writer.write_all(&pt)?;
+                    if last {
+                        let mut extra = [0u8; 1];
+                        if reader.read(&mut extra)? != 0 {
+                            return Err(Error::Crypto("Decryption failed: trailing data".into()));
+                        }
+                        return Ok(());
+                    }
+                    counter = counter.checked_add(1).ok_or_else(|| Error::Format("Too many chunks".into()))?;
+                }
+            })();
+            crypto::secure_zero(&mut key);
+            r?;
+        } else if version >= format::VERSION_AES_CHUNKED {
             let (salt, kdf, base_nonce) = format::read_aes_chunked_start(&mut reader)?;
             let mut key = crypto::derive_key(password, &salt, kdf)?;
             let mut chunk_index: u32 = 0;
@@ -274,28 +382,45 @@ pub fn decrypt_kyber<R: Read, W: Write>(
         validate_password(password)?;
         let (_key_ver, key_salt, key_kdf, key_nonce, encrypted_sk) = format::read_encrypted_secret_key(key_file_reader)?;
         let mut key_file_key = crypto::derive_key(password, &key_salt, key_kdf)?;
-        let mut sk_bytes = Zeroizing::new(crypto::aes_gcm_decrypt(&key_file_key, &key_nonce, &encrypted_sk)?);
+        let sk = crypto::aes_gcm_decrypt(&key_file_key, &key_nonce, &encrypted_sk);
         crypto::secure_zero(&mut key_file_key);
-        let (_version, format_byte) = format::read_header(&mut reader)?;
+        let sk_bytes = Zeroizing::new(sk?);
+        let (version, format_byte) = format::read_header(&mut reader)?;
         if format_byte != format::FORMAT_KYBER {
-            crypto::secure_zero(sk_bytes.as_mut_slice());
             return Err(Error::Format("Not a Kyber format file".into()));
         }
-        let (kem_ct, nonce, ciphertext_with_tag) = format::read_kyber_payload(&mut reader)?;
-        let mut ss = Zeroizing::new(nist_kyber::decapsulate(&kem_ct, &sk_bytes)?);
-        crypto::secure_zero(sk_bytes.as_mut_slice());
-        if ss.len() < 32 {
-            crypto::secure_zero(ss.as_mut_slice());
-            return Err(Error::Crypto("Decryption failed".into()));
-        }
-        let mut aes_key: [u8; 32] = ss[..32]
-            .try_into()
-            .map_err(|_| Error::Crypto("Decryption failed".into()))?;
-        let mut plaintext = Zeroizing::new(crypto::aes_gcm_decrypt(&aes_key, &nonce, &ciphertext_with_tag)?);
+        let mut aes_key: [u8; 32];
+        let (nonce, ciphertext_with_tag, aad) = if version >= format::VERSION_AEAD_BOUND {
+            let (kem_ct, salt, kdf, nonce, ct) = format::read_kyber_payload_v6(&mut reader)?;
+            let ss = Zeroizing::new(nist_kyber::decapsulate(&kem_ct, &sk_bytes)?);
+            if ss.len() < 32 {
+                return Err(Error::Crypto("Decryption failed".into()));
+            }
+            let mut pw_key = crypto::derive_key(password, &salt, kdf)?;
+            aes_key = kyber_hybrid_key(&ss, &pw_key, &salt, &kem_ct)?;
+            crypto::secure_zero(&mut pw_key);
+            let header = format::header_bytes(version, format_byte);
+            let aad = [&header[..], &(kem_ct.len() as u32).to_le_bytes(), &kem_ct, &salt[..], &[kdf], &nonce[..]].concat();
+            (nonce, ct, Some(aad))
+        } else {
+            let (kem_ct, nonce, ct) = format::read_kyber_payload(&mut reader)?;
+            let ss = Zeroizing::new(nist_kyber::decapsulate(&kem_ct, &sk_bytes)?);
+            if ss.len() < 32 {
+                return Err(Error::Crypto("Decryption failed".into()));
+            }
+            aes_key = ss[..32]
+                .try_into()
+                .map_err(|_| Error::Crypto("Decryption failed".into()))?;
+            (nonce, ct, None)
+        };
+        let dec = match &aad {
+            Some(a) => crypto::aes_gcm_decrypt_aad(&aes_key, &nonce, &ciphertext_with_tag, a),
+            None => crypto::aes_gcm_decrypt(&aes_key, &nonce, &ciphertext_with_tag),
+        };
+        crypto::secure_zero(&mut aes_key);
+        let mut plaintext = Zeroizing::new(dec?);
         writer.write_all(&plaintext)?;
         crypto::secure_zero(plaintext.as_mut_slice());
-        crypto::secure_zero(ss.as_mut_slice());
-        crypto::secure_zero(&mut aes_key);
         Ok(())
     })();
     enforce_min_decrypt_duration(start);
@@ -317,7 +442,24 @@ pub fn verify_file<R: Read>(mut reader: R) -> Result<()> {
             reader.read_exact(&mut nonce)?;
         }
         format::FORMAT_AES => {
-            if version >= format::VERSION_AES_CHUNKED {
+            if version >= format::VERSION_AEAD_BOUND {
+                let _ = format::read_aes_stream_start(&mut reader)?;
+                loop {
+                    let mut frame = [0u8; 5];
+                    reader.read_exact(&mut frame)?;
+                    if frame[0] > 1 {
+                        return Err(Error::Format("Invalid stream frame".into()));
+                    }
+                    let len = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+                    if len > AES_CHUNK_SIZE + crypto::TAG_LEN {
+                        return Err(Error::Format("Chunk size exceeds limit".into()));
+                    }
+                    std::io::copy(&mut (&mut reader).take(len as u64), &mut std::io::sink())?;
+                    if frame[0] == 1 {
+                        break;
+                    }
+                }
+            } else if version >= format::VERSION_AES_CHUNKED {
                 let _ = format::read_aes_chunked_start(&mut reader)?;
                 loop {
                     let mut len_buf = [0u8; 4];
@@ -342,7 +484,11 @@ pub fn verify_file<R: Read>(mut reader: R) -> Result<()> {
             }
         }
         format::FORMAT_KYBER => {
-            let (_, _, _) = format::read_kyber_payload(&mut reader)?;
+            if version >= format::VERSION_AEAD_BOUND {
+                let _ = format::read_kyber_payload_v6(&mut reader)?;
+            } else {
+                let (_, _, _) = format::read_kyber_payload(&mut reader)?;
+            }
         }
         _ => return Err(Error::Format("Unknown format byte".into())),
     }
@@ -528,7 +674,7 @@ mod tests {
         let mut cur = Cursor::new(&cipher);
         let (version, fmt) = read_header(&mut cur).unwrap();
         assert_eq!(fmt, FORMAT_KAOTIK);
-        assert_eq!(version, format::VERSION_KAOTIK_PADDED);
+        assert_eq!(version, format::VERSION_AEAD_BOUND);
     }
 
     #[test]
@@ -581,5 +727,87 @@ mod tests {
         assert!(verify_file(Cursor::new(&cipher)).is_ok());
         let bad: &[u8] = b"KAOS\x00\x00\x01\x00";
         assert!(verify_file(Cursor::new(bad)).is_err());
+    }
+
+    fn aes_cipher(plain: &[u8]) -> Vec<u8> {
+        let mut c = Vec::new();
+        encrypt_aes(Cursor::new(plain), &mut c, TEST_PASSWORD).unwrap();
+        c
+    }
+
+    #[test]
+    fn test_v6_aes_stream_roundtrip_multi_chunk_and_exact_boundary() {
+        for len in [0usize, 1, AES_CHUNK_SIZE, AES_CHUNK_SIZE + 1, 3 * AES_CHUNK_SIZE] {
+            let plain: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let c = aes_cipher(&plain);
+            assert_eq!(&c[4..6], &format::VERSION_AEAD_BOUND.to_le_bytes());
+            let mut d = Vec::new();
+            decrypt_aes(Cursor::new(&c), &mut d, TEST_PASSWORD).unwrap();
+            assert_eq!(d, plain, "len {}", len);
+        }
+    }
+
+    #[test]
+    fn test_v6_aes_stream_detects_truncation_and_trailing_data() {
+        let plain = vec![7u8; 2 * AES_CHUNK_SIZE + 10];
+        let c = aes_cipher(&plain);
+        // İlk bloğun sonunda kes: son-blok bayrağı olmadığından reddedilmeli.
+        let first_frame_end = 7 + 32 + 1 + 7 + 5 + AES_CHUNK_SIZE + 16;
+        let mut d = Vec::new();
+        assert!(decrypt_aes(Cursor::new(&c[..first_frame_end]), &mut d, TEST_PASSWORD).is_err());
+        // Bayrağı 1 yaparak erken bitirme denemesi: nonce değiştiğinden doğrulama başarısız.
+        let mut forged = c[..first_frame_end].to_vec();
+        forged[7 + 32 + 1 + 7] = 1;
+        assert!(decrypt_aes(Cursor::new(&forged), &mut Vec::new(), TEST_PASSWORD).is_err());
+        let mut extra = c.clone();
+        extra.push(0);
+        assert!(decrypt_aes(Cursor::new(&extra), &mut Vec::new(), TEST_PASSWORD).is_err());
+    }
+
+    #[test]
+    fn test_v6_header_and_kdf_tamper_rejected() {
+        let mut c = Vec::new();
+        encrypt_kaotik(Cursor::new(b"header binding"), &mut c, TEST_PASSWORD).unwrap();
+        let mut bad = c.clone();
+        bad[7 + 32] = crypto::KDF_ARGON2; // KDF düşürme denemesi
+        assert!(decrypt_kaotik(Cursor::new(&bad), &mut Vec::new(), TEST_PASSWORD).is_err());
+        let mut bad = c.clone();
+        bad[7 + 32] = 9;
+        assert!(decrypt_kaotik(Cursor::new(&bad), &mut Vec::new(), TEST_PASSWORD).is_err());
+        let mut bad = c.clone();
+        bad[4] = 5; // sürüm düşürme
+        assert!(decrypt_kaotik(Cursor::new(&bad), &mut Vec::new(), TEST_PASSWORD).is_err());
+    }
+
+    #[test]
+    fn test_v6_kyber_hybrid_roundtrip_and_wrong_password() {
+        let plain = b"post-quantum hybrid";
+        let mut c = Vec::new();
+        let mut key = Vec::new();
+        encrypt_kyber(Cursor::new(plain), &mut c, TEST_PASSWORD, &mut key).unwrap();
+        let mut d = Vec::new();
+        decrypt_kyber(Cursor::new(&c), &mut d, TEST_PASSWORD, &mut Cursor::new(&key)).unwrap();
+        assert_eq!(d, plain);
+        assert!(verify_file(Cursor::new(&c)).is_ok());
+        let mut bad = c.clone();
+        let n = bad.len();
+        bad[n - 1] ^= 1;
+        assert!(decrypt_kyber(Cursor::new(&bad), &mut Vec::new(), TEST_PASSWORD, &mut Cursor::new(&key)).is_err());
+        assert!(decrypt_kyber(Cursor::new(&c), &mut Vec::new(), "OtherPassword456!@#", &mut Cursor::new(&key)).is_err());
+    }
+
+    #[test]
+    fn test_unknown_kdf_rejected() {
+        assert!(crypto::derive_key("x", &[0u8; 32], 77).is_err());
+    }
+
+    #[test]
+    fn test_kaotik_roundtrip_larger_than_hkdf_limit() {
+        let plain: Vec<u8> = (0..50_000u32).map(|i| (i % 253) as u8).collect();
+        let mut c = Vec::new();
+        encrypt_kaotik(Cursor::new(&plain), &mut c, TEST_PASSWORD).unwrap();
+        let mut d = Vec::new();
+        decrypt_kaotik(Cursor::new(&c), &mut d, TEST_PASSWORD).unwrap();
+        assert_eq!(d, plain);
     }
 }

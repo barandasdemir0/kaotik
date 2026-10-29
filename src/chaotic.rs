@@ -132,7 +132,20 @@ pub fn generate_chaotic_key_hkdf(
     length: usize,
 ) -> Result<Vec<u8>> {
     let prk = chaotic_sequence_to_prk(chaotic_sequence, password, salt);
-    crypto::hkdf_expand(&prk, b"kaotik-key", length, Some(salt))
+    // HKDF-SHA256 en fazla 255*32 bayt üretebilir; daha uzun anahtar akışı blok sayaçlı info ile genişletilir.
+    const HKDF_MAX: usize = 255 * 32;
+    if length <= HKDF_MAX {
+        return crypto::hkdf_expand(&prk, b"kaotik-key", length, Some(salt));
+    }
+    let mut out = Vec::with_capacity(length);
+    let mut block: u64 = 0;
+    while out.len() < length {
+        let take = (length - out.len()).min(HKDF_MAX);
+        let info = [&b"kaotik-key/blk"[..], &block.to_le_bytes()].concat();
+        out.extend_from_slice(&crypto::hkdf_expand(&prk, &info, take, Some(salt))?);
+        block += 1;
+    }
+    Ok(out)
 }
 
 /// Hibrit kaotik dizi: tam sayı tabanlı 6 farklı durum geçişinin çapraz bağlanmış birleşimi.

@@ -1,4 +1,5 @@
 use kaotik::{crypto, decrypt_kaotik, encrypt_kaotik};
+use zeroize::Zeroizing;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Cursor;
@@ -105,7 +106,8 @@ fn make_tag(password: &str, idx: u32, data: &[u8], salt: &[u8; 16]) -> [u8; 16] 
     tag
 }
 
-pub fn chaff_pack(payload: &[u8], password: &str, fake_packets: u32) -> Result<Vec<u8>, String> {
+#[allow(dead_code)]
+fn chaff_pack_legacy(payload: &[u8], password: &str, fake_packets: u32) -> Result<Vec<u8>, String> {
     let mut salt = [0u8; 16];
     crypto::random_bytes(&mut salt).map_err(|e| e.to_string())?;
 
@@ -150,7 +152,7 @@ pub fn chaff_pack(payload: &[u8], password: &str, fake_packets: u32) -> Result<V
     Ok(out)
 }
 
-pub fn chaff_unpack(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
+fn chaff_unpack_legacy(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
     if blob.len() < 5 + 16 + 4 + 4 {
         return Err("Invalid chaff blob".into());
     }
@@ -214,7 +216,8 @@ pub fn chaff_unpack(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-pub fn deadman_wrap(payload: &[u8], expires_unix: u64, emergency_key: Option<&str>) -> Vec<u8> {
+#[allow(dead_code)]
+fn deadman_wrap_legacy(payload: &[u8], expires_unix: u64, emergency_key: Option<&str>) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(DEADMAN_MAGIC);
     out.extend_from_slice(&expires_unix.to_le_bytes());
@@ -232,7 +235,7 @@ pub fn deadman_wrap(payload: &[u8], expires_unix: u64, emergency_key: Option<&st
     out
 }
 
-pub fn deadman_unwrap(blob: &[u8], emergency_key: Option<&str>) -> Result<Vec<u8>, String> {
+fn deadman_unwrap_legacy(blob: &[u8], emergency_key: Option<&str>) -> Result<Vec<u8>, String> {
     if blob.len() < 4 + 8 + 1 + 16 {
         return Err("Invalid dead-man blob".into());
     }
@@ -286,7 +289,8 @@ fn permuted_positions(len: usize, password: &str) -> Vec<usize> {
     p
 }
 
-pub fn stego_embed(carrier: &[u8], secret: &[u8], password: &str) -> Result<Vec<u8>, String> {
+#[allow(dead_code)]
+fn stego_embed_legacy(carrier: &[u8], secret: &[u8], password: &str) -> Result<Vec<u8>, String> {
     let mut payload = Vec::with_capacity(STEGO_LEN_BYTES + secret.len());
     payload.extend_from_slice(&(secret.len() as u64).to_le_bytes());
     payload.extend_from_slice(secret);
@@ -307,7 +311,7 @@ pub fn stego_embed(carrier: &[u8], secret: &[u8], password: &str) -> Result<Vec<
     Ok(out)
 }
 
-pub fn stego_extract(stego: &[u8], password: &str) -> Result<Vec<u8>, String> {
+fn stego_extract_legacy(stego: &[u8], password: &str) -> Result<Vec<u8>, String> {
     if stego.len() < STEGO_LEN_BYTES * 8 {
         return Err("Stego file too small".into());
     }
@@ -320,7 +324,10 @@ pub fn stego_extract(stego: &[u8], password: &str) -> Result<Vec<u8>, String> {
         len_bytes[bit_idx / 8] |= bit << (bit_idx % 8);
     }
     let payload_len = u64::from_le_bytes(len_bytes) as usize;
-    let needed_bits = (STEGO_LEN_BYTES + payload_len) * 8;
+    let needed_bits = payload_len
+        .checked_add(STEGO_LEN_BYTES)
+        .and_then(|n| n.checked_mul(8))
+        .ok_or("Stego payload length invalid")?;
     if needed_bits > stego.len() {
         return Err("Stego payload length invalid".into());
     }
@@ -362,7 +369,8 @@ fn xor_stream(input: &[u8], key: &[u8; 32]) -> Vec<u8> {
     out
 }
 
-pub fn entropy_poison_wrap(payload: &[u8], password: &str) -> Result<Vec<u8>, String> {
+#[allow(dead_code)]
+fn entropy_poison_wrap_legacy(payload: &[u8], password: &str) -> Result<Vec<u8>, String> {
     let mut salt = [0u8; 32];
     crypto::random_bytes(&mut salt).map_err(|e| e.to_string())?;
     let entropy = runtime_entropy_hash();
@@ -382,7 +390,7 @@ pub fn entropy_poison_wrap(payload: &[u8], password: &str) -> Result<Vec<u8>, St
     Ok(out)
 }
 
-pub fn entropy_poison_unwrap(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
+fn entropy_poison_unwrap_legacy(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
     if blob.len() < 4 + 32 {
         return Err("Invalid entropy-poison blob".into());
     }
@@ -397,7 +405,8 @@ pub fn entropy_poison_unwrap(blob: &[u8], password: &str) -> Result<Vec<u8>, Str
     Ok(xor_stream(&blob[36..], &key))
 }
 
-pub fn polymorphic_wrap(payload: &[u8], password: &str) -> Result<Vec<u8>, String> {
+#[allow(dead_code)]
+fn polymorphic_wrap_legacy(payload: &[u8], password: &str) -> Result<Vec<u8>, String> {
     let mut salt = [0u8; 32];
     crypto::random_bytes(&mut salt).map_err(|e| e.to_string())?;
     let mut h = Sha256::new();
@@ -437,7 +446,7 @@ pub fn polymorphic_wrap(payload: &[u8], password: &str) -> Result<Vec<u8>, Strin
     Ok(out)
 }
 
-pub fn polymorphic_unwrap(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
+fn polymorphic_unwrap_legacy(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
     if blob.len() < 32 + 64 {
         return Err("Invalid polymorphic blob".into());
     }
@@ -487,7 +496,8 @@ pub fn polymorphic_unwrap(blob: &[u8], password: &str) -> Result<Vec<u8>, String
     Ok(payload)
 }
 
-pub fn quantum_canary_wrap(payload: &[u8], password: &str) -> Vec<u8> {
+#[allow(dead_code)]
+fn quantum_canary_wrap_legacy(payload: &[u8], password: &str) -> Vec<u8> {
     let mut h = Sha256::new();
     h.update(password.as_bytes());
     h.update(b"|quantum-canary|");
@@ -500,7 +510,7 @@ pub fn quantum_canary_wrap(payload: &[u8], password: &str) -> Vec<u8> {
     out
 }
 
-pub fn quantum_canary_unwrap(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
+fn quantum_canary_unwrap_legacy(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
     if blob.len() < 4 + 16 {
         return Err("Invalid quantum canary blob".into());
     }
@@ -520,7 +530,8 @@ pub fn quantum_canary_unwrap(blob: &[u8], password: &str) -> Result<Vec<u8>, Str
     Ok(payload.to_vec())
 }
 
-pub fn plausible_create(
+#[allow(dead_code)]
+fn plausible_create_legacy(
     decoy_plain: &[u8],
     hidden_plain: &[u8],
     decoy_password: &str,
@@ -550,7 +561,7 @@ pub fn plausible_create(
     Ok(out)
 }
 
-pub fn plausible_open(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
+fn plausible_open_legacy(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
     if blob.len() < 4 + 4 + 4 {
         return Err("Invalid plausible container".into());
     }
@@ -576,4 +587,599 @@ pub fn plausible_open(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
         }
     }
     Err("No plausible layer matched the password".into())
+}
+
+// ---------------------------------------------------------------------------
+// v2 katmanları: tüm parola kullanımları Argon2id (256 MiB) ana anahtarı + HKDF alt anahtarları üzerinden.
+// Hiçbir katman parolayı hızlı hash (SHA-256) ile işlemez; bu sayede dış katmanlar parola tahmin
+// oracle'ı olmaz ve Argon2 maliyeti atlatılamaz. Gizlilik/bütünlük AES-256-GCM (AAD) veya HMAC-SHA256 ile.
+// Eski (v1) biçimler yalnızca okunur, geri uyumluluk için.
+// ---------------------------------------------------------------------------
+
+const CHAFF2_MAGIC: &[u8; 5] = b"CHFF2";
+const DEADMAN2_MAGIC: &[u8; 4] = b"DMS2";
+const ENTROPY2_MAGIC: &[u8; 4] = b"ENP2";
+const QCAN2_MAGIC: &[u8; 4] = b"QCN2";
+const SALT: usize = crypto::SALT_LEN;
+const NONCE: usize = crypto::NONCE_LEN;
+const TAG: usize = crypto::TAG_LEN;
+const CHAFF_CHUNK: usize = 512;
+const STEGO_SALT_BITS: usize = SALT * 8;
+const PLAUSIBLE_BLOCK: usize = 4096;
+
+fn e2s(e: kaotik::Error) -> String {
+    e.to_string()
+}
+
+/// Parola + tuz → Argon2id ana anahtar → `info` bağlamına özel alt anahtar.
+fn layer_key(password: &str, salt: &[u8], info: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
+    let master = Zeroizing::new(crypto::derive_key(password, salt, crypto::KDF_DEFAULT).map_err(e2s)?);
+    Ok(Zeroizing::new(crypto::subkey(&master, info).map_err(e2s)?))
+}
+
+fn rand_array<const N: usize>() -> Result<[u8; N], String> {
+    let mut b = [0u8; N];
+    crypto::random_bytes(&mut b).map_err(e2s)?;
+    Ok(b)
+}
+
+/// Zarf: magic | salt | nonce | AES-GCM(payload, aad = magic|salt|nonce|extra).
+fn seal(magic: &[u8], password: &str, info: &[u8], extra_aad: &[u8], payload: &[u8]) -> Result<Vec<u8>, String> {
+    let salt: [u8; SALT] = rand_array()?;
+    let nonce: [u8; NONCE] = rand_array()?;
+    let key = layer_key(password, &salt, info)?;
+    let aad = [magic, &salt[..], &nonce[..], extra_aad].concat();
+    let ct = crypto::aes_gcm_encrypt_aad(&key, &nonce, payload, &aad).map_err(e2s)?;
+    Ok([&aad[..magic.len() + SALT + NONCE], &ct[..]].concat())
+}
+
+fn open(magic: &[u8], password: &str, info: &[u8], extra_aad: &[u8], blob: &[u8]) -> Result<Vec<u8>, String> {
+    let hdr = magic.len() + SALT + NONCE;
+    if blob.len() < hdr + TAG || &blob[..magic.len()] != magic {
+        return Err("Invalid sealed layer".into());
+    }
+    let salt = &blob[magic.len()..magic.len() + SALT];
+    let mut nonce = [0u8; NONCE];
+    nonce.copy_from_slice(&blob[magic.len() + SALT..hdr]);
+    let key = layer_key(password, salt, info)?;
+    let aad = [&blob[..hdr], extra_aad].concat();
+    crypto::aes_gcm_decrypt_aad(&key, &nonce, &blob[hdr..], &aad).map_err(|_| "Layer authentication failed".to_string())
+}
+
+/// Anahtarlı deterministik üreteç: HMAC-SHA256(key, sayaç) blokları (kriptografik PRF).
+struct KeyedRng {
+    key: Zeroizing<[u8; 32]>,
+    counter: u64,
+    buf: [u8; 32],
+    pos: usize,
+}
+
+impl KeyedRng {
+    fn new(key: Zeroizing<[u8; 32]>) -> Self {
+        KeyedRng { key, counter: 0, buf: [0u8; 32], pos: 32 }
+    }
+    fn next_u64(&mut self) -> u64 {
+        if self.pos + 8 > 32 {
+            self.buf = crypto::hmac_sha256(&self.key[..], &[&self.counter.to_le_bytes()]);
+            self.counter += 1;
+            self.pos = 0;
+        }
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&self.buf[self.pos..self.pos + 8]);
+        self.pos += 8;
+        u64::from_le_bytes(b)
+    }
+    /// [0, n) aralığında yansız (rejection sampling) sayı.
+    fn below(&mut self, n: u64) -> u64 {
+        let zone = u64::MAX - (u64::MAX % n);
+        loop {
+            let v = self.next_u64();
+            if v < zone {
+                return v % n;
+            }
+        }
+    }
+}
+
+// --- Chaff & winnow -------------------------------------------------------
+// Tüm paketler aynı boyutta (512 B), sahte paketler gerçek indeksleri taşır, etiketler HMAC-SHA256(Argon2 alt anahtarı).
+// Böylece boyut, indeks veya etiket üzerinden gerçek/sahte ayrımı yapılamaz; etiket parola oracle'ı değildir.
+
+pub fn chaff_pack(payload: &[u8], password: &str, fake_packets: u32) -> Result<Vec<u8>, String> {
+    let salt: [u8; SALT] = rand_array()?;
+    let mac_key = layer_key(password, &salt, b"kaotik-chaff-v2-mac")?;
+
+    let mut body = Zeroizing::new(Vec::with_capacity(8 + payload.len() + CHAFF_CHUNK));
+    body.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    body.extend_from_slice(payload);
+    let padded_len = body.len().div_ceil(CHAFF_CHUNK) * CHAFF_CHUNK;
+    let mut pad = vec![0u8; padded_len - body.len()];
+    crypto::random_bytes(&mut pad).map_err(e2s)?;
+    body.extend_from_slice(&pad);
+    let real_count = (padded_len / CHAFF_CHUNK) as u32;
+
+    let mut packets: Vec<(u32, Vec<u8>, [u8; 16])> = Vec::new();
+    for (i, c) in body.chunks(CHAFF_CHUNK).enumerate() {
+        let idx = i as u32;
+        let full = crypto::hmac_sha256(&mac_key[..], &[&salt, &idx.to_le_bytes(), c]);
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(&full[..16]);
+        packets.push((idx, c.to_vec(), tag));
+    }
+    let mut rng = KeyedRng::new(Zeroizing::new(rand_array()?));
+    for _ in 0..fake_packets {
+        let idx = rng.below(real_count as u64) as u32;
+        let mut data = vec![0u8; CHAFF_CHUNK];
+        crypto::random_bytes(&mut data).map_err(e2s)?;
+        packets.push((idx, data, rand_array()?));
+    }
+    for i in (1..packets.len()).rev() {
+        let j = rng.below(i as u64 + 1) as usize;
+        packets.swap(i, j);
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(CHAFF2_MAGIC);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&real_count.to_le_bytes());
+    out.extend_from_slice(&(packets.len() as u32).to_le_bytes());
+    for (idx, data, tag) in packets {
+        out.extend_from_slice(&idx.to_le_bytes());
+        out.extend_from_slice(&tag);
+        out.extend_from_slice(&data);
+    }
+    Ok(out)
+}
+
+pub fn chaff_unpack(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
+    if blob.len() >= 5 && &blob[..5] == CHAFF_MAGIC {
+        return chaff_unpack_legacy(blob, password);
+    }
+    let hdr = 5 + SALT + 8;
+    if blob.len() < hdr || &blob[..5] != CHAFF2_MAGIC {
+        return Err("Invalid chaff blob".into());
+    }
+    let salt = &blob[5..5 + SALT];
+    let real_count = u32::from_le_bytes(blob[5 + SALT..5 + SALT + 4].try_into().unwrap()) as usize;
+    let total = u32::from_le_bytes(blob[5 + SALT + 4..hdr].try_into().unwrap()) as usize;
+    let pkt = 4 + 16 + CHAFF_CHUNK;
+    if real_count == 0 || total < real_count || blob.len() != hdr + total * pkt {
+        return Err("Malformed chaff blob".into());
+    }
+    let mac_key = layer_key(password, salt, b"kaotik-chaff-v2-mac")?;
+    let mut real: Vec<Option<&[u8]>> = vec![None; real_count];
+    for p in blob[hdr..].chunks(pkt) {
+        let idx = u32::from_le_bytes(p[..4].try_into().unwrap());
+        let tag = &p[4..20];
+        let data = &p[20..];
+        if (idx as usize) < real_count {
+            let full = crypto::hmac_sha256(&mac_key[..], &[salt, &idx.to_le_bytes(), data]);
+            if crypto::ct_eq(&full[..16], tag) {
+                real[idx as usize] = Some(data);
+            }
+        }
+    }
+    let mut body = Zeroizing::new(Vec::with_capacity(real_count * CHAFF_CHUNK));
+    for r in real {
+        body.extend_from_slice(r.ok_or("Unable to recover all real packets")?);
+    }
+    let len = u64::from_le_bytes(body[..8].try_into().unwrap()) as usize;
+    if len > body.len() - 8 {
+        return Err("Malformed chaff payload".into());
+    }
+    Ok(body[8..8 + len].to_vec())
+}
+
+// --- Dead-man switch -----------------------------------------------------
+// Veri rastgele bir veri anahtarıyla şifrelenir. Veri anahtarı iki yuvada saklanır:
+// (1) parola yuvası — yalnızca son tarihe kadar kullanılır, (2) acil anahtar yuvası — her zaman.
+// Son tarih AAD ile doğrulanır: değiştirilirse tüm yuvalar açılmaz.
+// Not: Çevrimdışı bir dosyada zaman kilidi yerel saate dayanır; parola sahibinin saati geri alması
+// engellenemez. Kriptografik olarak garanti edilen: son tarih değiştirilemez ve acil anahtar olmadan
+// parola dışında bir yol yoktur.
+
+fn deadman_slot(secret: &str, info: &[u8], aad: &[u8], data_key: &[u8; 32]) -> Result<Vec<u8>, String> {
+    let salt: [u8; SALT] = rand_array()?;
+    let nonce: [u8; NONCE] = rand_array()?;
+    let k = layer_key(secret, &salt, info)?;
+    let ct = crypto::aes_gcm_encrypt_aad(&k, &nonce, data_key, aad).map_err(e2s)?;
+    Ok([&salt[..], &nonce[..], &ct[..]].concat())
+}
+
+fn deadman_slot_open(secret: &str, info: &[u8], aad: &[u8], slot: &[u8]) -> Option<Zeroizing<[u8; 32]>> {
+    let k = layer_key(secret, &slot[..SALT], info).ok()?;
+    let nonce: [u8; NONCE] = slot[SALT..SALT + NONCE].try_into().ok()?;
+    let pt = Zeroizing::new(crypto::aes_gcm_decrypt_aad(&k, &nonce, &slot[SALT + NONCE..], aad).ok()?);
+    let mut out = Zeroizing::new([0u8; 32]);
+    out.copy_from_slice(pt.get(..32)?);
+    Some(out)
+}
+
+const DM_SLOT: usize = SALT + NONCE + 32 + TAG;
+
+pub fn deadman_wrap(payload: &[u8], expires_unix: u64, password: &str, emergency_key: Option<&str>) -> Result<Vec<u8>, String> {
+    let data_key = Zeroizing::new(rand_array::<32>()?);
+    let flags = emergency_key.is_some() as u8;
+    let mut hdr = Vec::new();
+    hdr.extend_from_slice(DEADMAN2_MAGIC);
+    hdr.extend_from_slice(&expires_unix.to_le_bytes());
+    hdr.push(flags);
+    let pw_slot = deadman_slot(password, b"kaotik-dms-v2-password", &hdr, &data_key)?;
+    let em_slot = match emergency_key {
+        Some(k) => deadman_slot(k, b"kaotik-dms-v2-emergency", &hdr, &data_key)?,
+        None => {
+            let mut r = vec![0u8; DM_SLOT];
+            crypto::random_bytes(&mut r).map_err(e2s)?;
+            r
+        }
+    };
+    let nonce: [u8; NONCE] = rand_array()?;
+    let ct = crypto::aes_gcm_encrypt_aad(&data_key, &nonce, payload, &hdr).map_err(e2s)?;
+    Ok([&hdr[..], &pw_slot, &em_slot, &nonce[..], &ct].concat())
+}
+
+pub fn deadman_unwrap(blob: &[u8], password: Option<&str>, emergency_key: Option<&str>) -> Result<Vec<u8>, String> {
+    if blob.len() >= 4 && &blob[..4] == DEADMAN_MAGIC {
+        return deadman_unwrap_legacy(blob, emergency_key);
+    }
+    if blob.len() < 4 || &blob[..4] != DEADMAN2_MAGIC {
+        return Ok(blob.to_vec());
+    }
+    let hdr_len = 4 + 8 + 1;
+    if blob.len() < hdr_len + 2 * DM_SLOT + NONCE + TAG {
+        return Err("Invalid dead-man blob".into());
+    }
+    let hdr = &blob[..hdr_len];
+    let expires = u64::from_le_bytes(blob[4..12].try_into().unwrap());
+    let has_emergency = blob[12] == 1;
+    let pw_slot = &blob[hdr_len..hdr_len + DM_SLOT];
+    let em_slot = &blob[hdr_len + DM_SLOT..hdr_len + 2 * DM_SLOT];
+    let rest = &blob[hdr_len + 2 * DM_SLOT..];
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
+
+    let mut data_key = None;
+    if now <= expires {
+        if let Some(p) = password {
+            data_key = deadman_slot_open(p, b"kaotik-dms-v2-password", hdr, pw_slot);
+        }
+    }
+    if data_key.is_none() && has_emergency {
+        if let Some(k) = emergency_key {
+            data_key = deadman_slot_open(k, b"kaotik-dms-v2-emergency", hdr, em_slot);
+        }
+    }
+    let data_key = data_key.ok_or("Dead-man switch active: data locked")?;
+    let nonce: [u8; NONCE] = rest[..NONCE].try_into().unwrap();
+    crypto::aes_gcm_decrypt_aad(&data_key, &nonce, &rest[NONCE..], hdr).map_err(|_| "Dead-man payload authentication failed".to_string())
+}
+
+// --- Steganografi --------------------------------------------------------
+// İlk 256 LSB rastgele tuzu taşır (rastgele bitlerden ayırt edilemez). Kalan bit konumları
+// Argon2 alt anahtarıyla beslenen HMAC-PRF ile karıştırılır; gömülen veri AES-GCM ile şifrelenir.
+// Çıkarılan ham bitler şifreli metin olduğundan uzunluk dahil hiçbir bilgi sızdırmaz.
+
+fn stego_positions(len: usize, key: Zeroizing<[u8; 32]>) -> Vec<usize> {
+    let mut p: Vec<usize> = (STEGO_SALT_BITS..len).collect();
+    let mut rng = KeyedRng::new(key);
+    for i in (1..p.len()).rev() {
+        let j = rng.below(i as u64 + 1) as usize;
+        p.swap(i, j);
+    }
+    p
+}
+
+fn stego_write_bits(out: &mut [u8], pos: &[usize], bytes: &[u8]) {
+    for bit_idx in 0..bytes.len() * 8 {
+        let bit = (bytes[bit_idx / 8] >> (bit_idx % 8)) & 1;
+        out[pos[bit_idx]] = (out[pos[bit_idx]] & 0xFE) | bit;
+    }
+}
+
+fn stego_read_bits(src: &[u8], pos: &[usize], n: usize) -> Vec<u8> {
+    let mut out = vec![0u8; n];
+    for bit_idx in 0..n * 8 {
+        out[bit_idx / 8] |= (src[pos[bit_idx]] & 1) << (bit_idx % 8);
+    }
+    out
+}
+
+pub fn stego_embed(carrier: &[u8], secret: &[u8], password: &str) -> Result<Vec<u8>, String> {
+    let salt: [u8; SALT] = rand_array()?;
+    let nonce: [u8; NONCE] = rand_array()?;
+    let master = Zeroizing::new(crypto::derive_key(password, &salt, crypto::KDF_DEFAULT).map_err(e2s)?);
+    let pos_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-stego-v2-positions").map_err(e2s)?);
+    let enc_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-stego-v2-aead").map_err(e2s)?);
+    let len_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-stego-v2-len").map_err(e2s)?);
+
+    let ct = crypto::aes_gcm_encrypt_aad(&enc_key, &nonce, secret, &salt).map_err(e2s)?;
+    // Uzunluk, anahtar akışıyla maskelenir (şifreli metin uzunluğu dışarıdan görünmez).
+    let mask = crypto::hmac_sha256(&len_key[..], &[b"len"]);
+    let mut len_bytes = (ct.len() as u64).to_le_bytes();
+    for i in 0..8 {
+        len_bytes[i] ^= mask[i];
+    }
+    let payload = [&len_bytes[..], &nonce[..], &ct[..]].concat();
+    if STEGO_SALT_BITS + payload.len() * 8 > carrier.len() {
+        return Err("Carrier file too small for payload".into());
+    }
+    let mut out = carrier.to_vec();
+    let salt_pos: Vec<usize> = (0..STEGO_SALT_BITS).collect();
+    stego_write_bits(&mut out, &salt_pos, &salt);
+    let pos = stego_positions(carrier.len(), pos_key);
+    stego_write_bits(&mut out, &pos, &payload);
+    Ok(out)
+}
+
+pub fn stego_extract(stego: &[u8], password: &str) -> Result<Vec<u8>, String> {
+    if stego.len() < STEGO_SALT_BITS + (STEGO_LEN_BYTES + NONCE + TAG) * 8 {
+        return Err("Stego file too small".into());
+    }
+    let salt_pos: Vec<usize> = (0..STEGO_SALT_BITS).collect();
+    let salt = stego_read_bits(stego, &salt_pos, SALT);
+    let master = Zeroizing::new(crypto::derive_key(password, &salt, crypto::KDF_DEFAULT).map_err(e2s)?);
+    let pos_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-stego-v2-positions").map_err(e2s)?);
+    let enc_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-stego-v2-aead").map_err(e2s)?);
+    let len_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-stego-v2-len").map_err(e2s)?);
+    let pos = stego_positions(stego.len(), pos_key);
+
+    let head = stego_read_bits(stego, &pos, STEGO_LEN_BYTES + NONCE);
+    let mask = crypto::hmac_sha256(&len_key[..], &[b"len"]);
+    let mut lb = [0u8; 8];
+    for i in 0..8 {
+        lb[i] = head[i] ^ mask[i];
+    }
+    let ct_len = u64::from_le_bytes(lb) as usize;
+    let total = STEGO_LEN_BYTES + NONCE + ct_len;
+    if ct_len >= TAG && total.checked_mul(8).is_some_and(|b| b <= pos.len()) {
+        let payload = stego_read_bits(stego, &pos, total);
+        let nonce: [u8; NONCE] = payload[8..8 + NONCE].try_into().unwrap();
+        if let Ok(pt) = crypto::aes_gcm_decrypt_aad(&enc_key, &nonce, &payload[8 + NONCE..], &salt) {
+            return Ok(pt);
+        }
+    }
+    // Eski (v1) biçim: şifrelenmemiş, SHA-256 konumlu.
+    stego_extract_legacy(stego, password).map_err(|_| "Stego extraction failed".to_string())
+}
+
+// --- Entropy poisoning ---------------------------------------------------
+// Tuz = OS CSPRNG ⊕ çalışma zamanı ölçümü (CSPRNG tek başına yeterlidir; ölçüm yalnızca ek karıştırmadır).
+
+pub fn entropy_poison_wrap(payload: &[u8], password: &str) -> Result<Vec<u8>, String> {
+    let entropy = runtime_entropy_hash();
+    let mut ticket: [u8; 32] = rand_array()?;
+    for i in 0..32 {
+        ticket[i] ^= entropy[i];
+    }
+    let sealed = seal(ENTROPY2_MAGIC, password, b"kaotik-entropy-v2", &ticket, payload)?;
+    Ok([&sealed[..4], &ticket[..], &sealed[4..]].concat())
+}
+
+pub fn entropy_poison_unwrap(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
+    if blob.len() >= 4 && &blob[..4] == ENTROPY_MAGIC {
+        return entropy_poison_unwrap_legacy(blob, password);
+    }
+    if blob.len() < 4 + 32 || &blob[..4] != ENTROPY2_MAGIC {
+        return Ok(blob.to_vec());
+    }
+    let ticket = &blob[4..36];
+    let inner = [&blob[..4], &blob[36..]].concat();
+    open(ENTROPY2_MAGIC, password, b"kaotik-entropy-v2", ticket, &inner)
+}
+
+// --- Polimorfik sarmalama ------------------------------------------------
+// Düzen: salt | nonce | AEAD_meta(prefix, ct_len) | rastgele önek | AEAD(payload) | rastgele sonek.
+// Sabit imza yok; tüm baytlar rastgele/şifreli metinden ayırt edilemez.
+
+const POLY_META_CT: usize = 8 + TAG;
+
+pub fn polymorphic_wrap(payload: &[u8], password: &str) -> Result<Vec<u8>, String> {
+    let salt: [u8; SALT] = rand_array()?;
+    let nonce: [u8; NONCE] = rand_array()?;
+    let master = Zeroizing::new(crypto::derive_key(password, &salt, crypto::KDF_DEFAULT).map_err(e2s)?);
+    let meta_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-poly-v2-meta").map_err(e2s)?);
+    let data_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-poly-v2-data").map_err(e2s)?);
+    let r: [u8; 2] = rand_array()?;
+    let prefix = 64 + (r[0] as usize % 192);
+    let suffix = 64 + (r[1] as usize % 192);
+    let aad = [&salt[..], &nonce[..]].concat();
+    let data_ct = crypto::aes_gcm_encrypt_aad(&data_key, &nonce, payload, &aad).map_err(e2s)?;
+    let mut meta = [0u8; 8];
+    meta[..4].copy_from_slice(&(prefix as u32).to_le_bytes());
+    meta[4..].copy_from_slice(&(data_ct.len() as u32).to_le_bytes());
+    let meta_ct = crypto::aes_gcm_encrypt_aad(&meta_key, &nonce, &meta, &aad).map_err(e2s)?;
+    let mut pre = vec![0u8; prefix];
+    let mut suf = vec![0u8; suffix];
+    crypto::random_bytes(&mut pre).map_err(e2s)?;
+    crypto::random_bytes(&mut suf).map_err(e2s)?;
+    Ok([&aad[..], &meta_ct, &pre, &data_ct, &suf].concat())
+}
+
+pub fn polymorphic_unwrap(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
+    let head = SALT + NONCE + POLY_META_CT;
+    if blob.len() >= head + TAG {
+        let salt = &blob[..SALT];
+        let nonce: [u8; NONCE] = blob[SALT..SALT + NONCE].try_into().unwrap();
+        let aad = &blob[..SALT + NONCE];
+        let master = Zeroizing::new(crypto::derive_key(password, salt, crypto::KDF_DEFAULT).map_err(e2s)?);
+        let meta_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-poly-v2-meta").map_err(e2s)?);
+        if let Ok(meta) = crypto::aes_gcm_decrypt_aad(&meta_key, &nonce, &blob[SALT + NONCE..head], aad) {
+            let prefix = u32::from_le_bytes(meta[..4].try_into().unwrap()) as usize;
+            let ct_len = u32::from_le_bytes(meta[4..8].try_into().unwrap()) as usize;
+            let start = head + prefix;
+            let end = start.checked_add(ct_len).ok_or("Invalid polymorphic bounds")?;
+            if end > blob.len() {
+                return Err("Invalid polymorphic payload bounds".into());
+            }
+            let data_key = Zeroizing::new(crypto::subkey(&master, b"kaotik-poly-v2-data").map_err(e2s)?);
+            return crypto::aes_gcm_decrypt_aad(&data_key, &nonce, &blob[start..end], aad)
+                .map_err(|_| "Invalid polymorphic payload".to_string());
+        }
+    }
+    polymorphic_unwrap_legacy(blob, password)
+}
+
+// --- Bütünlük kanaryası --------------------------------------------------
+// Kanarya = HMAC-SHA256(Argon2 alt anahtarı, payload). Herhangi bir bit değişimi tespit edilir.
+
+pub fn quantum_canary_wrap(payload: &[u8], password: &str) -> Result<Vec<u8>, String> {
+    let salt: [u8; SALT] = rand_array()?;
+    let key = layer_key(password, &salt, b"kaotik-canary-v2")?;
+    let tag = crypto::hmac_sha256(&key[..], &[QCAN2_MAGIC, &salt, payload]);
+    Ok([&QCAN2_MAGIC[..], &salt, &tag, payload].concat())
+}
+
+pub fn quantum_canary_unwrap(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
+    if blob.len() >= 4 && &blob[..4] == QCAN_MAGIC {
+        return quantum_canary_unwrap_legacy(blob, password);
+    }
+    if blob.len() < 4 || &blob[..4] != QCAN2_MAGIC {
+        return Ok(blob.to_vec());
+    }
+    if blob.len() < 4 + SALT + 32 {
+        return Err("Invalid quantum canary blob".into());
+    }
+    let salt = &blob[4..4 + SALT];
+    let tag = &blob[4 + SALT..4 + SALT + 32];
+    let payload = &blob[4 + SALT + 32..];
+    let key = layer_key(password, salt, b"kaotik-canary-v2")?;
+    let expected = crypto::hmac_sha256(&key[..], &[QCAN2_MAGIC, salt, payload]);
+    if !crypto::ct_eq(&expected, tag) {
+        return Err("Quantum canary tripped".into());
+    }
+    Ok(payload.to_vec())
+}
+
+// --- İnkâr edilebilir (plausible deniability) konteyner ------------------
+// İki eşit boyutlu yuva; her biri salt | nonce | AES-GCM(len | veri | rastgele dolgu). Sihirli bayt,
+// uzunluk alanı veya düz metin metaverisi yoktur: konteyner tamamen rastgele görünür ve gizli katmanın
+// varlığı kanıtlanamaz (decoy parolası yalnızca kendi yuvasını açar; diğer yuva rastgele veriden ayırt edilemez).
+// Açarken her iki yuva için de Argon2 çalıştırılır (zamanlama hangi yuvanın açıldığını sızdırmaz).
+
+fn plausible_slot(plain: &[u8], password: &str, body_len: usize) -> Result<Vec<u8>, String> {
+    let salt: [u8; SALT] = rand_array()?;
+    let nonce: [u8; NONCE] = rand_array()?;
+    let key = layer_key(password, &salt, b"kaotik-pdn-v2")?;
+    let mut body = Zeroizing::new(Vec::with_capacity(body_len));
+    body.extend_from_slice(&(plain.len() as u64).to_le_bytes());
+    body.extend_from_slice(plain);
+    let mut pad = vec![0u8; body_len - body.len()];
+    crypto::random_bytes(&mut pad).map_err(e2s)?;
+    body.extend_from_slice(&pad);
+    let ct = crypto::aes_gcm_encrypt_aad(&key, &nonce, &body, &salt).map_err(e2s)?;
+    Ok([&salt[..], &nonce[..], &ct].concat())
+}
+
+pub fn plausible_create(
+    decoy_plain: &[u8],
+    hidden_plain: &[u8],
+    decoy_password: &str,
+    hidden_password: &str,
+) -> Result<Vec<u8>, String> {
+    kaotik::validate_password(decoy_password).map_err(e2s)?;
+    kaotik::validate_password(hidden_password).map_err(e2s)?;
+    if crypto::ct_eq(decoy_password.as_bytes(), hidden_password.as_bytes()) {
+        return Err("Decoy and hidden passwords must differ".into());
+    }
+    let r: [u8; 1] = rand_array()?;
+    let need = 8 + decoy_plain.len().max(hidden_plain.len());
+    let body_len = (need.div_ceil(PLAUSIBLE_BLOCK) + (r[0] as usize % 4)) * PLAUSIBLE_BLOCK;
+    let d = plausible_slot(decoy_plain, decoy_password, body_len)?;
+    let h = plausible_slot(hidden_plain, hidden_password, body_len)?;
+    let (a, b) = if (r[0] >> 7) == 0 { (d, h) } else { (h, d) };
+    Ok([a, b].concat())
+}
+
+pub fn plausible_open(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
+    if blob.len() >= 4 && &blob[..4] == PLAUSIBLE_MAGIC {
+        return plausible_open_legacy(blob, password);
+    }
+    if !blob.len().is_multiple_of(2) || blob.len() < 2 * (SALT + NONCE + TAG + 8) {
+        return Err("Invalid plausible container".into());
+    }
+    let half = blob.len() / 2;
+    let mut found: Option<Vec<u8>> = None;
+    for slot in [&blob[..half], &blob[half..]] {
+        let salt = &slot[..SALT];
+        let nonce: [u8; NONCE] = slot[SALT..SALT + NONCE].try_into().unwrap();
+        let key = layer_key(password, salt, b"kaotik-pdn-v2")?;
+        if let Ok(body) = crypto::aes_gcm_decrypt_aad(&key, &nonce, &slot[SALT + NONCE..], salt) {
+            let body = Zeroizing::new(body);
+            let len = u64::from_le_bytes(body[..8].try_into().unwrap()) as usize;
+            if found.is_none() && len <= body.len() - 8 {
+                found = Some(body[8..8 + len].to_vec());
+            }
+        }
+    }
+    found.ok_or_else(|| "No plausible layer matched the password".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PW: &str = "TestPassword123!@#";
+    const PW2: &str = "HiddenPassword456$%^";
+
+    #[test]
+    fn chaff_roundtrip_uniform_packets_and_wrong_password() {
+        let data: Vec<u8> = (0..1500u32).map(|i| i as u8).collect();
+        let blob = chaff_pack(&data, PW, 10).unwrap();
+        assert_eq!(chaff_unpack(&blob, PW).unwrap(), data);
+        assert!(chaff_unpack(&blob, PW2).is_err());
+        let total = u32::from_le_bytes(blob[5 + SALT + 4..5 + SALT + 8].try_into().unwrap()) as usize;
+        assert_eq!(blob.len(), 5 + SALT + 8 + total * (4 + 16 + CHAFF_CHUNK));
+    }
+
+    #[test]
+    fn deadman_password_emergency_and_tamper() {
+        let far = u64::MAX;
+        let blob = deadman_wrap(b"secret", far, PW, Some(PW2)).unwrap();
+        assert_eq!(deadman_unwrap(&blob, Some(PW), None).unwrap(), b"secret");
+        assert_eq!(deadman_unwrap(&blob, None, Some(PW2)).unwrap(), b"secret");
+        let expired = deadman_wrap(b"secret", 1, PW, Some(PW2)).unwrap();
+        assert!(deadman_unwrap(&expired, Some(PW), None).is_err());
+        assert_eq!(deadman_unwrap(&expired, Some(PW), Some(PW2)).unwrap(), b"secret");
+        // Son tarihi uzatma denemesi: AAD doğrulaması başarısız olmalı.
+        let mut forged = expired.clone();
+        forged[4..12].copy_from_slice(&far.to_le_bytes());
+        assert!(deadman_unwrap(&forged, Some(PW), None).is_err());
+    }
+
+    #[test]
+    fn stego_roundtrip_and_wrong_password() {
+        let mut carrier = vec![0u8; 8192];
+        crypto::random_bytes(&mut carrier).unwrap();
+        let out = stego_embed(&carrier, b"hidden msg", PW).unwrap();
+        assert_eq!(stego_extract(&out, PW).unwrap(), b"hidden msg");
+        assert!(stego_extract(&out, PW2).map(|v| v != b"hidden msg").unwrap_or(true));
+    }
+
+    #[test]
+    fn wrappers_roundtrip_and_detect_tamper() {
+        let data = b"layered payload".to_vec();
+        let e = entropy_poison_wrap(&data, PW).unwrap();
+        assert_eq!(entropy_poison_unwrap(&e, PW).unwrap(), data);
+        assert!(entropy_poison_unwrap(&e, PW2).is_err());
+
+        let p = polymorphic_wrap(&data, PW).unwrap();
+        assert_eq!(polymorphic_unwrap(&p, PW).unwrap(), data);
+        assert!(polymorphic_unwrap(&p, PW2).is_err());
+
+        let q = quantum_canary_wrap(&data, PW).unwrap();
+        assert_eq!(quantum_canary_unwrap(&q, PW).unwrap(), data);
+        let mut bad = q.clone();
+        let n = bad.len();
+        bad[n - 1] ^= 1;
+        assert!(quantum_canary_unwrap(&bad, PW).is_err());
+    }
+
+    #[test]
+    fn plausible_both_layers_open_and_no_magic() {
+        let c = plausible_create(b"decoy", b"the real secret", PW, PW2).unwrap();
+        assert_ne!(&c[..4], PLAUSIBLE_MAGIC);
+        assert_eq!(c.len() % 2, 0);
+        assert_eq!(plausible_open(&c, PW).unwrap(), b"decoy");
+        assert_eq!(plausible_open(&c, PW2).unwrap(), b"the real secret");
+        assert!(plausible_open(&c, "WrongPassword789&*(").is_err());
+    }
 }

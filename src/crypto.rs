@@ -11,6 +11,10 @@ pub const TAG_LEN: usize = 16;
 /// KDF türü: 0 = PBKDF2 (eski), 1 = Argon2id (önerilen)
 pub const KDF_PBKDF2: u8 = 0;
 pub const KDF_ARGON2: u8 = 1;
+/// Argon2id güçlendirilmiş profil (v6+): 256 MiB bellek, 4 iterasyon. GPU/ASIC kaba kuvvetini pahalılaştırır.
+pub const KDF_ARGON2_STRONG: u8 = 2;
+/// Yeni dosyalar için varsayılan KDF.
+pub const KDF_DEFAULT: u8 = KDF_ARGON2_STRONG;
 
 pub fn derive_key_pbkdf2(password: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
     let mut key = [0u8; KEY_LEN];
@@ -34,12 +38,55 @@ pub fn derive_key_argon2(password: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
     Ok(key)
 }
 
-/// kdf: 0 = PBKDF2, 1 = Argon2id. Eski dosyalar için geri uyumlu.
+/// Argon2id güçlü profil: 256 MiB, t=4.
+pub fn derive_key_argon2_strong(password: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
+    use argon2::{Algorithm, Argon2, ParamsBuilder, Version};
+    let params = ParamsBuilder::new()
+        .m_cost(262_144)
+        .t_cost(4)
+        .p_cost(1)
+        .build()
+        .map_err(|e| Error::Crypto(e.to_string()))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; KEY_LEN];
+    argon2
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .map_err(|e| Error::Crypto(e.to_string()))?;
+    Ok(key)
+}
+
+/// kdf: 0 = PBKDF2, 1 = Argon2id, 2 = Argon2id güçlü. Bilinmeyen değer reddedilir.
 pub fn derive_key(password: &str, salt: &[u8], kdf: u8) -> Result<[u8; KEY_LEN]> {
     match kdf {
+        KDF_PBKDF2 => derive_key_pbkdf2(password, salt),
         KDF_ARGON2 => derive_key_argon2(password, salt),
-        _ => derive_key_pbkdf2(password, salt),
+        KDF_ARGON2_STRONG => derive_key_argon2_strong(password, salt),
+        _ => Err(Error::Format("Unknown KDF".into())),
     }
+}
+
+/// Ana anahtardan bağlama özel 32 baytlık alt anahtar (HKDF-SHA256).
+pub fn subkey(master: &[u8; KEY_LEN], info: &[u8]) -> Result<[u8; KEY_LEN]> {
+    let okm = hkdf_expand(master, info, KEY_LEN, None)?;
+    let mut k = [0u8; KEY_LEN];
+    k.copy_from_slice(&okm);
+    Ok(k)
+}
+
+/// HMAC-SHA256.
+pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    for p in parts {
+        mac.update(p);
+    }
+    mac.finalize().into_bytes().into()
+}
+
+/// Sabit zamanlı karşılaştırma.
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.len() == b.len() && a.ct_eq(b).unwrap_u8() == 1
 }
 
 /// Salt ile daha güçlü PRK; salt yoksa None (geri uyumlu).
@@ -74,6 +121,39 @@ pub fn aes_gcm_decrypt(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN], ciphertext:
         .decrypt(nonce.into(), ciphertext)
         .map_err(|_| Error::Crypto("Decryption failed".into()))?;
     Ok(plaintext)
+}
+
+/// AES-256-GCM, ek doğrulanmış veri (AAD) ile: başlık/metaveri değiştirilirse çözme başarısız olur.
+pub fn aes_gcm_encrypt_aad(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    use aes_gcm::{
+        aead::{Aead, KeyInit, Payload},
+        Aes256Gcm,
+    };
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::Crypto("Invalid key".into()))?;
+    cipher
+        .encrypt(nonce.into(), Payload { msg: plaintext, aad })
+        .map_err(|e| Error::Crypto(e.to_string()))
+}
+
+pub fn aes_gcm_decrypt_aad(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    use aes_gcm::{
+        aead::{Aead, KeyInit, Payload},
+        Aes256Gcm,
+    };
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::Crypto("Invalid key".into()))?;
+    cipher
+        .decrypt(nonce.into(), Payload { msg: ciphertext, aad })
+        .map_err(|_| Error::Crypto("Decryption failed".into()))
+}
+
+/// STREAM yapısı (Hoang-Reyhanitabar-Rogaway-Vizár): prefix(7) || sayaç(4, BE) || son_blok(1).
+/// Son blok bayrağı sayesinde kesme (truncation) ve blok yer değiştirme saldırıları tespit edilir.
+pub fn stream_nonce(prefix: &[u8; 7], counter: u32, last: bool) -> [u8; NONCE_LEN] {
+    let mut n = [0u8; NONCE_LEN];
+    n[..7].copy_from_slice(prefix);
+    n[7..11].copy_from_slice(&counter.to_be_bytes());
+    n[11] = last as u8;
+    n
 }
 
 pub fn random_bytes(buf: &mut [u8]) -> Result<()> {
